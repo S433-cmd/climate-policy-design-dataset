@@ -63,3 +63,32 @@ Once released, this folder will contain:
 - `data/final/` (DCCSR release files)
 
 Until then, this repository focuses on code structure, documentation, and reproducible processing steps.
+
+---
+
+## Reproducibility / Quickstart (minimal)
+This repo is currently organized as R Markdown notebooks (plus Python via `reticulate` where applicable).
+
+**General expectations**
+- Use repo-relative paths (no local absolute paths).
+- No secrets are stored in the repository.
+
+**Environment variables (if needed)**
+- `OPENAI_API_KEY` should be provided via your local environment (e.g., `.Renviron`, shell env vars, or keychain/keyring set interactively).
+- The repository code should only **read** secrets (never write them).
+
+---
+
+## Changelog
+See `CHANGELOG.md`.
+
+---
+
+## Citation
+A citation entry will be added once the dissertation/paper is public.  
+For now, please cite the dissertation chapter introducing the dataset.
+
+---
+
+## License
+License to be confirmed (TBD).
