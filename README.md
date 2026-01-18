@@ -37,18 +37,18 @@ The repository currently contains three main directories:
 └── descriptive replication/   # scripts/notebooks for descriptive analyses & figures
 ```
 
-Data dictionary (lite)
+## Data dictionary (lite)
 
 A full codebook is being prepared.
 For now, below are the main variable groups documented in the dissertation appendix:
-	•	Policy orientation & targeting
-	•	Consumer_Oriented
-	•	Target_Group
-	•	Income_Group, Income_Confidence
-	•	Ownership_Requirement
-	•	Investment_Costs_and_Financial_Burden
-	•	Policy type & sector mapping
-	•	Policy_Instrument, Sub_Category
-	•	Sector_Classification, sector & instrument counts
-	•	Metadata
-	•	Policy_ID, Country, Year, Description, …
+- Policy orientation & targeting
+- Consumer_Oriented
+- Target_Group
+- Income_Group, Income_Confidence
+- Ownership_Requirement
+- Investment_Costs_and_Financial_Burden
+- Policy type & sector mapping
+- Policy_Instrument, Sub_Category
+- Sector_Classification, sector & instrument counts
+- Metadata
+- Policy_ID, Country, Year, Description, …
