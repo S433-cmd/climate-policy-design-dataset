@@ -1,0 +1,1449 @@
+---
+title: "Post-Validation_IEA_consumer"
+author: "Simon Rittershaus"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+
+# === Package-Check & Load ===
+packages <- c(
+  "dplyr", "tidyr", "stringr", "readr", "janitor", "purrr", 
+  "arrow", "knitr", "lubridate", "ggplot2", "scales", "forcats", "kableExtra", "patchwork", "ggforce", "lme4", "lmerTest", "mclust", "slider"
+)
+
+# install missing packages
+installed <- rownames(installed.packages())
+to_install <- setdiff(packages, installed)
+if (length(to_install) > 0) {
+  install.packages(to_install, dependencies = TRUE)
+}
+
+# load all packages
+lapply(packages, library, character.only = TRUE)
+```
+
+
+# Load data
+```{r load dataframes}
+library(here)
+
+# Repo-relative directories
+input_dir  <- here::here("processing", "analysis", "Input")
+output_dir <- here::here("processing", "post-validation")
+
+# Ensure output dir exists (safe, no logic change)
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+subs_path <- file.path(input_dir, "collapsed_subsidies_trials_mode_aggregated.RData")
+regs_path <- file.path(input_dir, "collapsed_regulations_trials_mode_aggregated.RData")
+iea_path  <- file.path(input_dir, "updated_IEA_Database_boolean.RData")
+
+# Guards (fail fast, clearer errors)
+stopifnot("input_dir not found" = dir.exists(input_dir))
+stopifnot("subs_path missing"  = file.exists(subs_path))
+stopifnot("regs_path missing"  = file.exists(regs_path))
+stopifnot("iea_path missing"   = file.exists(iea_path))
+
+load(subs_path)
+load(regs_path)
+load(iea_path)
+
+subs_mode_sorted$id_countryiso_year_url <- as.numeric(subs_mode_sorted$id_countryiso_year_url)
+regs_mode_sorted$id_countryiso_year_url <- as.numeric(regs_mode_sorted$id_countryiso_year_url)
+
+regs_mode_sorted <- regs_mode_sorted %>% dplyr::filter(!is.na(policy_name))
+
+iea <- df1_updated %>% dplyr::select("Policy":"New_Added_Technologies")
+
+subs_iea_left <- subs_mode_sorted %>% dplyr::left_join(iea, by = "id_countryiso_year_url")
+iea_subs_left <- iea %>% dplyr::left_join(subs_mode_sorted, by = "id_countryiso_year_url")
+
+regs_iea_left <- regs_mode_sorted %>% dplyr::left_join(iea, by = "id_countryiso_year_url")
+iea_regs_left <- iea %>% dplyr::left_join(regs_mode_sorted, by = "id_countryiso_year_url")
+```
+
+
+
+# Validation
+```{r postvalidation_sampling}
+set.seed(2035)  # Reproduzierbarkeit
+
+# --- Parameter ---
+n_sample            <- 20
+min_recent_share    <- 0.5
+min_recent          <- ceiling(n_sample * min_recent_share)
+min_cons_share_regs <- 0.3
+min_cons_regs       <- ceiling(n_sample * min_cons_share_regs)
+
+# =========================
+# 1) Subsidies: iea_subs_left
+#    Bedingung: >= 50% ab Jahr 2010
+# =========================
+
+subs_df <- iea_subs_left
+
+# Sicherstellen, dass "year" numerisch ist
+subs_df <- subs_df %>% mutate(year = as.numeric(year))
+
+# Checks
+if (sum(subs_df$year >= 2010, na.rm = TRUE) < min_recent) {
+  stop("Zu wenige Subsidy-Policies ab 2010, um die 50%-Bedingung zu erfüllen.")
+}
+
+subs_recent <- subs_df %>% filter(year >= 2010)
+subs_older  <- subs_df %>% filter(year < 2010)
+
+# Ziehe genau min_recent Beobachtungen ab 2010,
+# Rest aus älteren Jahren
+subs_sample_recent <- subs_recent %>% dplyr::slice_sample(n = min_recent)
+subs_sample_rest   <- subs_older  %>% dplyr::slice_sample(n = n_sample - min_recent)
+
+subs_sample_full <- bind_rows(subs_sample_recent, subs_sample_rest)
+
+# Sanity Check
+mean(subs_sample_full$year >= 2010, na.rm = TRUE)  # sollte >= 0.5 sein
+
+
+# =========================
+# 2) Regulations: iea_regs_left
+#    Bedingungen:
+#      - >= 50% ab Jahr 2010
+#      - >= 30% consumer_oriented == TRUE
+# =========================
+
+regs_df <- iea_regs_left %>%
+  mutate(
+    year              = as.numeric(year),
+    consumer_oriented = as.logical(consumer_oriented)
+  )
+
+# Checks: genug consumer_oriented == TRUE? genug Policies ab 2010?
+if (sum(regs_df$consumer_oriented, na.rm = TRUE) < min_cons_regs) {
+  stop("Zu wenige consumer_oriented==TRUE in iea_regs_left, um >=30% im Sample zu garantieren.")
+}
+
+if (sum(regs_df$year >= 2010, na.rm = TRUE) < min_recent) {
+  stop("Zu wenige Regulations ab 2010, um die 50%-Bedingung zu erfüllen.")
+}
+
+# (a) Erst consumer-oriented-Policies ziehen (mindestens min_cons_regs),
+#     bevorzugt aus Jahr >= 2010
+regs_cons        <- regs_df %>% filter(consumer_oriented == TRUE)
+regs_cons_recent <- regs_cons %>% filter(year >= 2010)
+regs_cons_older  <- regs_cons %>% filter(year < 2010)
+
+# So viele wie möglich der benötigten TRUE aus recent nehmen
+n_cons_from_recent <- min(nrow(regs_cons_recent), min_cons_regs)
+
+regs_cons_sample_recent <- regs_cons_recent %>%
+  dplyr::slice_sample(n = n_cons_from_recent)
+
+# Falls nicht genug recent TRUE, Rest aus älteren Jahren
+if (n_cons_from_recent < min_cons_regs) {
+  n_cons_from_older <- min(min_cons_regs - n_cons_from_recent,
+                           nrow(regs_cons_older))
+  
+  regs_cons_sample_older <- regs_cons_older %>%
+    filter(!id_countryiso_year_url %in% regs_cons_sample_recent$id_countryiso_year_url) %>%
+    dplyr::slice_sample(n = n_cons_from_older)
+  
+  regs_cons_sample <- bind_rows(regs_cons_sample_recent, regs_cons_sample_older)
+} else {
+  regs_cons_sample <- regs_cons_sample_recent
+}
+
+# (b) Restliche Beobachtungen auffüllen, aber
+#     insgesamt mindestens min_recent ab 2010
+
+n_already_sampled       <- nrow(regs_cons_sample)
+n_remaining_total       <- n_sample - n_already_sampled
+n_recent_in_cons_sample <- sum(regs_cons_sample$year >= 2010, na.rm = TRUE)
+
+n_recent_needed_total      <- min_recent
+n_recent_needed_from_rest  <- max(0, n_recent_needed_total - n_recent_in_cons_sample)
+n_recent_needed_from_rest  <- min(n_recent_needed_from_rest, n_remaining_total)
+
+regs_rest <- regs_df %>%
+  filter(!id_countryiso_year_url %in% regs_cons_sample$id_countryiso_year_url)
+
+regs_rest_recent <- regs_rest %>% filter(year >= 2010)
+regs_rest_other  <- regs_rest %>% filter(year < 2010)
+
+if (nrow(regs_rest_recent) < n_recent_needed_from_rest) {
+  stop("Zu wenige verbleibende recent-Regulations, um die 50%-Bedingung zu erfüllen.")
+}
+
+regs_rest_sample_recent <- regs_rest_recent %>%
+  dplyr::slice_sample(n = n_recent_needed_from_rest)
+
+n_remaining_final <- n_remaining_total - nrow(regs_rest_sample_recent)
+
+if (n_remaining_final > 0) {
+  regs_rest_pool_remaining <- regs_rest %>%
+    filter(!id_countryiso_year_url %in% regs_rest_sample_recent$id_countryiso_year_url)
+  
+  regs_rest_sample_other <- regs_rest_pool_remaining %>%
+    dplyr::slice_sample(n = n_remaining_final)
+  
+  regs_sample_full <- bind_rows(
+    regs_cons_sample,
+    regs_rest_sample_recent,
+    regs_rest_sample_other
+  )
+} else {
+  regs_sample_full <- bind_rows(
+    regs_cons_sample,
+    regs_rest_sample_recent
+  )
+}
+
+# Sanity Checks
+mean(regs_sample_full$year >= 2010, na.rm = TRUE)          # >= 0.5
+mean(regs_sample_full$consumer_oriented, na.rm = TRUE)     # >= 0.3
+
+
+# =========================
+# 3) Dataframes für Handkodierung ohne KI-Variablen
+# =========================
+
+# Gemeinsame KI-Variablen, die raus sollen
+vars_drop_common <- c(
+  "correctly_identified",
+  "homeownership_requirement",
+  "url_field_exists",
+  "external_sources_used",
+  "policy_package",
+  "policy_category",
+  "structural_type",
+  "consumer_type",
+  "income_confidence",
+  "acquisition_investment_costs",
+  "target_group",
+  "consumer_sectors",
+  "consumer_instruments",
+  "additional_consumer_sectors",
+  "additional_consumer_instruments",
+  "structural_sectors",
+  "structural_instruments",
+  "additional_structural_sectors",
+  "additional_structural_instruments",
+  "source_used",
+  "external_source_role",
+  "sector_classification",
+  "policy_instrument",
+  "sub_category",
+  "eu_policy",
+  "target_group_int",
+  "consumer_sectors_count",
+  "consumer_instruments_count",
+  "additional_consumer_sectors_count",
+  "additional_consumer_instruments_count",
+  "structural_sectors_count",
+  "structural_instruments_count",
+  "additional_structural_sectors_count",
+  "additional_structural_instruments_count",
+  "flag_consumer_oriented_not_41_42",
+  "flag_income_group_not_41_42"
+)
+
+# Welche KI-Variablen sollen vorerst ausgeblendet werden?
+vars_drop_subs <- c(
+  "consumer_oriented",
+  "structural",
+  "hybrid_policy",
+  "none",
+  "income_group",
+  vars_drop_common
+)
+
+vars_drop_regs <- c(
+  "consumer_oriented",
+  "structural",
+  "hybrid_policy",
+  "none",
+  "income_burden_group",
+  vars_drop_common
+)
+
+subs_sample_hand <- subs_sample_full %>%
+  dplyr::select(-dplyr::any_of(vars_drop_subs)) %>%
+  dplyr::mutate(
+    consumer_oriented_hand       = NA_character_,
+    income_group_hand            = NA_character_,
+    consumer_oriented_comment    = NA_character_,
+    income_group_comment         = NA_character_
+  )
+
+regs_sample_hand <- regs_sample_full %>%
+  dplyr::select(-dplyr::any_of(vars_drop_regs)) %>%
+  dplyr::mutate(
+    consumer_oriented_hand         = NA_character_,
+    income_burden_group_hand       = NA_character_,
+    consumer_oriented_comment      = NA_character_,
+    income_burden_group_comment    = NA_character_
+  )
+
+# =========================
+# 4) Export für Handkodierung (Excel)
+# =========================
+
+# Sicherstellen, dass Output-Verzeichnis existiert
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# Paket für Excel-Export sicherstellen
+if (!requireNamespace("writexl", quietly = TRUE)) {
+  install.packages("writexl")
+}
+
+# =========================
+# 4) Export für Handkodierung (Excel mit Dropdowns)
+# =========================
+
+if (!requireNamespace("openxlsx", quietly = TRUE)) {
+  install.packages("openxlsx")
+}
+library(openxlsx)
+
+# --- Hilfslisten ---
+consumer_choices <- c("TRUE", "FALSE")
+income_choices   <- c("Lower income", "All incomes equally", "Higher income")
+
+# Strings für Excel-Dropdown (mit äußeren Anführungszeichen!)
+dv_consumer <- paste0('"', paste(consumer_choices, collapse = ","), '"')
+dv_income   <- paste0('"', paste(income_choices,   collapse = ","), '"')
+
+# -------------------------
+# Subsidies Excel erstellen
+# -------------------------
+wb_subs <- openxlsx::createWorkbook()
+openxlsx::addWorksheet(wb_subs, "Handcoding")
+
+openxlsx::writeData(wb_subs, "Handcoding", subs_sample_hand)
+
+# Dropdown für consumer_oriented_hand
+openxlsx::dataValidation(
+  wb_subs, "Handcoding",
+  col  = which(names(subs_sample_hand) == "consumer_oriented_hand"),
+  rows = 2:(nrow(subs_sample_hand) + 1),
+  type = "list",
+  value = dv_consumer
+)
+
+# Dropdown für income_group_hand
+openxlsx::dataValidation(
+  wb_subs, "Handcoding",
+  col  = which(names(subs_sample_hand) == "income_group_hand"),
+  rows = 2:(nrow(subs_sample_hand) + 1),
+  type = "list",
+  value = dv_income
+)
+
+openxlsx::saveWorkbook(
+  wb_subs,
+  file.path(output_dir, "postvalidation_iea_subs_sample_for_handcoding.xlsx"),
+  overwrite = TRUE
+)
+
+# -------------------------
+# Regulations Excel erstellen
+# -------------------------
+wb_regs <- openxlsx::createWorkbook()
+openxlsx::addWorksheet(wb_regs, "Handcoding")
+
+openxlsx::writeData(wb_regs, "Handcoding", regs_sample_hand)
+
+openxlsx::dataValidation(
+  wb_regs, "Handcoding",
+  col  = which(names(regs_sample_hand) == "consumer_oriented_hand"),
+  rows = 2:(nrow(regs_sample_hand) + 1),
+  type = "list",
+  value = dv_consumer
+)
+
+openxlsx::dataValidation(
+  wb_regs, "Handcoding",
+  col  = which(names(regs_sample_hand) == "income_burden_group_hand"),
+  rows = 2:(nrow(regs_sample_hand) + 1),
+  type = "list",
+  value = dv_income
+)
+
+openxlsx::saveWorkbook(
+  wb_regs,
+  file.path(output_dir, "postvalidation_iea_regs_sample_for_handcoding.xlsx"),
+  overwrite = TRUE
+)
+
+# OPTIONAL: KI-Werte parallel sicher abspeichern
+saveRDS(
+  subs_sample_full %>%
+    dplyr::select(
+      id_countryiso_year_url,
+      dplyr::any_of(c("consumer_oriented", "structural",
+                      "hybrid_policy", "none", "income_group",
+                      vars_drop_common))
+    ),
+  file.path(output_dir, "postvalidation_iea_subs_KIvalues_backup.rds")
+)
+
+saveRDS(
+  regs_sample_full %>%
+    dplyr::select(
+      id_countryiso_year_url,
+      dplyr::any_of(c("consumer_oriented", "income_burden_group",
+                      vars_drop_common))
+    ),
+  file.path(output_dir, "postvalidation_iea_regs_KIvalues_backup.rds")
+)
+```
+
+# Validierung NEU
+```{r postvalidation_sampling}
+set.seed(2035)  # Reproduzierbarkeit
+
+# --- Parameter ---
+n_sample            <- 20                 # Gesamtziel: 20 Regulations im Sample
+min_recent_share    <- 0.5               # 50 % ab 2010 (für Gesamtstichprobe)
+min_recent          <- ceiling(n_sample * min_recent_share)  # = 10
+
+# =========================
+# 1) Subsidies: iea_subs_left
+#    Bedingung: >= 50% ab Jahr 2010
+# =========================
+
+subs_df <- iea_subs_left
+
+# Sicherstellen, dass "year" numerisch ist
+subs_df <- subs_df %>% mutate(year = as.numeric(year))
+
+# Checks
+if (sum(subs_df$year >= 2010, na.rm = TRUE) < min_recent) {
+  stop("Zu wenige Subsidy-Policies ab 2010, um die 50%-Bedingung zu erfüllen.")
+}
+
+subs_recent <- subs_df %>% filter(year >= 2010)
+subs_older  <- subs_df %>% filter(year < 2010)
+
+# Ziehe genau min_recent Beobachtungen ab 2010,
+# Rest aus älteren Jahren
+subs_sample_recent <- subs_recent %>% dplyr::slice_sample(n = min_recent)
+subs_sample_rest   <- subs_older  %>% dplyr::slice_sample(n = n_sample - min_recent)
+
+subs_sample_full <- bind_rows(subs_sample_recent, subs_sample_rest)
+
+# Sanity Check
+mean(subs_sample_full$year >= 2010, na.rm = TRUE)  # sollte >= 0.5 sein
+
+
+# =========================
+# 2) Regulations: iea_regs_left
+#    Jetzt: 10 bereits validierte + 10 neue
+#    Bedingungen für die 10 neuen:
+#      - nur Fälle mit KI-Kodierung (consumer_oriented nicht NA)
+#      - >= 2 mit consumer_oriented == TRUE
+#      - Gesamtstichprobe (20) weiterhin >= 50 % ab 2010
+# =========================
+
+regs_df <- iea_regs_left %>%
+  mutate(
+    year              = as.numeric(year),
+    consumer_oriented = as.logical(consumer_oriented)
+  ) %>%
+  # 🔴 NEU: nur Beobachtungen behalten, bei denen es eine KI-Kodierung gibt
+  filter(!is.na(consumer_oriented))
+
+# 🔴 IDs der bereits validierten 10 Beobachtungen
+# Bitte GENAU so eintragen, wie sie in iea_regs_left$id_countryiso_year_url stehen
+validated_ids <- c(
+  124202013092,
+25020207687,
+3620147376,
+4422012454,
+362010888,
+250202017749,
+36202115868,
+41020102415,
+72420142380,
+840202116663)
+  
+
+
+# Bereits validierte Zeilen herausziehen
+regs_fixed <- regs_df %>%
+  filter(id_countryiso_year_url %in% validated_ids) %>%
+  dplyr::mutate(.order = match(id_countryiso_year_url, validated_ids)) %>%
+  dplyr::arrange(.order) %>%
+  dplyr::select(-.order)
+
+# Restliche Fälle, aus denen NEU gezogen werden darf
+regs_df_new <- regs_df %>%
+  filter(!id_countryiso_year_url %in% validated_ids)
+
+# Ziel: 20 insgesamt, 10 davon bereits validiert
+n_sample_total_regs <- 20
+n_existing_regs     <- nrow(regs_fixed)
+n_new_sample_regs   <- n_sample_total_regs - n_existing_regs  # sollte 10 sein
+
+if (n_existing_regs != 10) {
+  warning(paste("Es wurden", n_existing_regs, "bereits validierte Regulations gefunden (erwartet: 10)."))
+}
+if (n_new_sample_regs <= 0) {
+  stop("Keine neuen Regulations nötig – es sind bereits >= 20 validiert.")
+}
+
+# Anforderungen an die NEUEN 10:
+min_cons_regs_new <- 2  # mindestens 2 TRUE unter den neuen 10
+
+# 50%-Bedingung für Gesamtstichprobe (20): mindestens 10 ab 2010
+n_recent_total_required <- min_recent          # = 10
+n_recent_fixed          <- sum(regs_fixed$year >= 2010, na.rm = TRUE)
+
+min_recent_new <- max(0, n_recent_total_required - n_recent_fixed)
+min_recent_new <- min(min_recent_new, n_new_sample_regs)   # kann höchstens 10 sein
+
+# Checks: genug TRUE & genug "recent" für die neuen
+if (sum(regs_df_new$consumer_oriented, na.rm = TRUE) < min_cons_regs_new) {
+  stop("Zu wenige consumer_oriented==TRUE in regs_df_new, um >=2 TRUE im neuen Sample zu garantieren.")
+}
+
+if (sum(regs_df_new$year >= 2010, na.rm = TRUE) < min_recent_new) {
+  stop("Zu wenige Regulations ab 2010 in regs_df_new, um die 50%-Bedingung (gesamt) zu erfüllen.")
+}
+
+# (a) Erst consumer-oriented-Policies ziehen (mindestens min_cons_regs_new),
+#     bevorzugt aus Jahr >= 2010
+regs_cons_new        <- regs_df_new %>% filter(consumer_oriented == TRUE)
+regs_cons_recent_new <- regs_cons_new %>% filter(year >= 2010)
+regs_cons_older_new  <- regs_cons_new %>% filter(year < 2010)
+
+# So viele wie möglich der benötigten TRUE aus recent nehmen
+n_cons_from_recent_new <- min(nrow(regs_cons_recent_new), min_cons_regs_new)
+
+regs_cons_sample_recent_new <- regs_cons_recent_new %>%
+  dplyr::slice_sample(n = n_cons_from_recent_new)
+
+# Falls nicht genug recent TRUE, Rest aus älteren Jahren
+if (n_cons_from_recent_new < min_cons_regs_new) {
+  n_cons_from_older_new <- min(min_cons_regs_new - n_cons_from_recent_new,
+                               nrow(regs_cons_older_new))
+  
+  regs_cons_sample_older_new <- regs_cons_older_new %>%
+    filter(!id_countryiso_year_url %in% regs_cons_sample_recent_new$id_countryiso_year_url) %>%
+    dplyr::slice_sample(n = n_cons_from_older_new)
+  
+  regs_cons_sample_new <- bind_rows(regs_cons_sample_recent_new, regs_cons_sample_older_new)
+} else {
+  regs_cons_sample_new <- regs_cons_sample_recent_new
+}
+
+# (b) Restliche NEUE Beobachtungen auffüllen, aber
+#     insgesamt mindestens min_recent_new ab 2010 im NEUEN Teil
+
+n_already_sampled_new       <- nrow(regs_cons_sample_new)
+n_remaining_total_new       <- n_new_sample_regs - n_already_sampled_new
+n_recent_in_cons_sample_new <- sum(regs_cons_sample_new$year >= 2010, na.rm = TRUE)
+
+n_recent_needed_total_new     <- min_recent_new
+n_recent_needed_from_rest_new <- max(0, n_recent_needed_total_new - n_recent_in_cons_sample_new)
+n_recent_needed_from_rest_new <- min(n_recent_needed_from_rest_new, n_remaining_total_new)
+
+regs_rest_new <- regs_df_new %>%
+  filter(!id_countryiso_year_url %in% regs_cons_sample_new$id_countryiso_year_url)
+
+regs_rest_recent_new <- regs_rest_new %>% filter(year >= 2010)
+regs_rest_other_new  <- regs_rest_new %>% filter(year < 2010)
+
+if (nrow(regs_rest_recent_new) < n_recent_needed_from_rest_new) {
+  stop("Zu wenige verbleibende recent-Regulations in regs_df_new, um die 50%-Bedingung (gesamt) zu erfüllen.")
+}
+
+regs_rest_sample_recent_new <- regs_rest_recent_new %>%
+  dplyr::slice_sample(n = n_recent_needed_from_rest_new)
+
+n_remaining_final_new <- n_remaining_total_new - nrow(regs_rest_sample_recent_new)
+
+if (n_remaining_final_new > 0) {
+  regs_rest_pool_remaining_new <- regs_rest_new %>%
+    filter(!id_countryiso_year_url %in% regs_rest_sample_recent_new$id_countryiso_year_url)
+  
+  regs_rest_sample_other_new <- regs_rest_pool_remaining_new %>%
+    dplyr::slice_sample(n = n_remaining_final_new)
+  
+  regs_sample_full_new <- bind_rows(
+    regs_cons_sample_new,
+    regs_rest_sample_recent_new,
+    regs_rest_sample_other_new
+  )
+} else {
+  regs_sample_full_new <- bind_rows(
+    regs_cons_sample_new,
+    regs_rest_sample_recent_new
+  )
+}
+
+# Jetzt: alte 10 + neue 10 zusammenführen
+regs_sample_full <- bind_rows(
+  regs_fixed,
+  regs_sample_full_new
+)
+
+# Sanity Checks für GESAMT (20)
+mean(regs_sample_full$year >= 2010, na.rm = TRUE)      # sollte >= 0.5 sein
+mean(regs_sample_full$consumer_oriented, na.rm = TRUE) # Info: Anteil TRUE
+
+# =========================
+# 3) Dataframes für Handkodierung ohne KI-Variablen
+# =========================
+
+# Gemeinsame KI-Variablen, die raus sollen
+vars_drop_common <- c(
+  "correctly_identified",
+  "homeownership_requirement",
+  "url_field_exists",
+  "external_sources_used",
+  "policy_package",
+  "policy_category",
+  "structural_type",
+  "consumer_type",
+  "income_confidence",
+  "acquisition_investment_costs",
+  "target_group",
+  "consumer_sectors",
+  "consumer_instruments",
+  "additional_consumer_sectors",
+  "additional_consumer_instruments",
+  "structural_sectors",
+  "structural_instruments",
+  "additional_structural_sectors",
+  "additional_structural_instruments",
+  "source_used",
+  "external_source_role",
+  "sector_classification",
+  "policy_instrument",
+  "sub_category",
+  "eu_policy",
+  "target_group_int",
+  "consumer_sectors_count",
+  "consumer_instruments_count",
+  "additional_consumer_sectors_count",
+  "additional_consumer_instruments_count",
+  "structural_sectors_count",
+  "structural_instruments_count",
+  "additional_structural_sectors_count",
+  "additional_structural_instruments_count",
+  "flag_consumer_oriented_not_41_42",
+  "flag_income_group_not_41_42"
+)
+
+# Welche KI-Variablen sollen vorerst ausgeblendet werden?
+vars_drop_subs <- c(
+  "consumer_oriented",
+  "structural",
+  "hybrid_policy",
+  "none",
+  "income_group",
+  vars_drop_common
+)
+
+vars_drop_regs <- c(
+  "consumer_oriented",
+  "structural",
+  "hybrid_policy",
+  "none",
+  "Not applicable",
+  "income_burden_group",
+  vars_drop_common
+)
+
+subs_sample_hand <- subs_sample_full %>%
+  dplyr::select(-dplyr::any_of(vars_drop_subs)) %>%
+  dplyr::mutate(
+    consumer_oriented_hand       = NA_character_,
+    income_group_hand            = NA_character_,
+    consumer_oriented_comment    = NA_character_,
+    income_group_comment         = NA_character_
+  )
+
+regs_sample_hand <- regs_sample_full %>%
+  dplyr::select(-dplyr::any_of(vars_drop_regs)) %>%
+  dplyr::mutate(
+    consumer_oriented_hand         = NA_character_,
+    income_burden_group_hand       = NA_character_,
+    consumer_oriented_comment      = NA_character_,
+    income_burden_group_comment    = NA_character_
+  )
+
+# =========================
+# 4) Export für Handkodierung (Excel mit Dropdowns)
+# =========================
+
+# Sicherstellen, dass Output-Verzeichnis existiert
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+if (!requireNamespace("openxlsx", quietly = TRUE)) {
+  install.packages("openxlsx")
+}
+library(openxlsx)
+
+consumer_choices <- c("TRUE", "FALSE")
+income_choices   <- c("Lower income", "All incomes equally", "Higher income")
+
+dv_consumer <- paste0('"', paste(consumer_choices, collapse = ","), '"')
+dv_income   <- paste0('"', paste(income_choices,   collapse = ","), '"')
+
+# Subsidies
+wb_subs <- openxlsx::createWorkbook()
+openxlsx::addWorksheet(wb_subs, "Handcoding")
+openxlsx::writeData(wb_subs, "Handcoding", subs_sample_hand)
+
+openxlsx::dataValidation(
+  wb_subs, "Handcoding",
+  col  = which(names(subs_sample_hand) == "consumer_oriented_hand"),
+  rows = 2:(nrow(subs_sample_hand) + 1),
+  type = "list",
+  value = dv_consumer
+)
+
+openxlsx::dataValidation(
+  wb_subs, "Handcoding",
+  col  = which(names(subs_sample_hand) == "income_group_hand"),
+  rows = 2:(nrow(subs_sample_hand) + 1),
+  type = "list",
+  value = dv_income
+)
+
+openxlsx::saveWorkbook(
+  wb_subs,
+  file.path(output_dir, "postvalidation_iea_subs_sample_for_handcoding.xlsx"),
+  overwrite = TRUE
+)
+
+# Regulations
+wb_regs <- openxlsx::createWorkbook()
+openxlsx::addWorksheet(wb_regs, "Handcoding")
+openxlsx::writeData(wb_regs, "Handcoding", regs_sample_hand)
+
+openxlsx::dataValidation(
+  wb_regs, "Handcoding",
+  col  = which(names(regs_sample_hand) == "consumer_oriented_hand"),
+  rows = 2:(nrow(regs_sample_hand) + 1),
+  type = "list",
+  value = dv_consumer
+)
+
+openxlsx::dataValidation(
+  wb_regs, "Handcoding",
+  col  = which(names(regs_sample_hand) == "income_burden_group_hand"),
+  rows = 2:(nrow(regs_sample_hand) + 1),
+  type = "list",
+  value = dv_income
+)
+
+openxlsx::saveWorkbook(
+  wb_regs,
+  file.path(output_dir, "postvalidation_iea_regs_sample_for_handcoding.xlsx"),
+  overwrite = TRUE
+)
+
+# OPTIONAL: KI-Werte parallel sichern
+saveRDS(
+  subs_sample_full %>%
+    dplyr::select(
+      id_countryiso_year_url,
+      dplyr::any_of(c("consumer_oriented", "structural",
+                      "hybrid_policy", "none", "income_group",
+                      vars_drop_common))
+    ),
+  file.path(output_dir, "postvalidation_iea_subs_KIvalues_backup.rds")
+)
+
+saveRDS(
+  regs_sample_full %>%
+    dplyr::select(
+      id_countryiso_year_url,
+      dplyr::any_of(c("consumer_oriented", "income_burden_group",
+                      vars_drop_common))
+    ),
+  file.path(output_dir, "postvalidation_iea_regs_KIvalues_backup.rds")
+)
+
+```
+
+
+
+
+# Validation Auswertung
+## Einlesen
+```{r postvalidation_compare}
+# Pakete für Ein-/Auslesen von Excel
+if (!requireNamespace("readxl", quietly = TRUE)) {
+  install.packages("readxl")
+}
+if (!requireNamespace("writexl", quietly = TRUE)) {
+  install.packages("writexl")
+}
+library(readxl)
+
+# Pfade zu den Handkodierungs-Dateien
+subs_hand_path <- file.path(output_dir, "postvalidation_iea_subs_sample_for_handcoding.xlsx")
+regs_hand_path <- file.path(output_dir, "postvalidation_iea_regs_sample_for_handcoding.xlsx")
+
+# Einlesen der Handkodierung
+subs_hand <- readxl::read_xlsx(subs_hand_path)
+regs_hand <- readxl::read_xlsx(regs_hand_path)
+
+# Einlesen der KI-Backups
+subs_ki <- readRDS(file.path(output_dir, "postvalidation_iea_subs_KIvalues_backup.rds"))
+regs_ki <- readRDS(file.path(output_dir, "postvalidation_iea_regs_KIvalues_backup.rds"))
+
+# Zusammenführen über id_countryiso_year_url
+subs_validated <- subs_hand %>%
+  dplyr::left_join(subs_ki, by = "id_countryiso_year_url")
+
+regs_validated <- regs_hand %>%
+  dplyr::left_join(regs_ki, by = "id_countryiso_year_url")
+
+# Vergleich: Handkodierung vs. KI-Kodierung
+subs_validated <- subs_validated %>%
+  dplyr::mutate(
+    consumer_oriented_match = dplyr::case_when(
+      is.na(consumer_oriented_hand) | is.na(consumer_oriented) ~ NA,
+      TRUE ~ consumer_oriented_hand == as.character(consumer_oriented)
+    ),
+    income_group_match = dplyr::case_when(
+      is.na(income_group_hand) | is.na(income_group) ~ NA,
+      TRUE ~ income_group_hand == as.character(income_group)
+    )
+  )
+
+regs_validated <- regs_validated %>%
+  dplyr::mutate(
+    consumer_oriented_match = dplyr::case_when(
+      is.na(consumer_oriented_hand) | is.na(consumer_oriented) ~ NA,
+      TRUE ~ consumer_oriented_hand == as.character(consumer_oriented)
+    ),
+    income_burden_group_match = dplyr::case_when(
+      is.na(income_burden_group_hand) | is.na(income_burden_group) ~ NA,
+      TRUE ~ income_burden_group_hand == as.character(income_burden_group)
+    )
+  )
+
+# Ergebnisse speichern (Excel + RDS)
+writexl::write_xlsx(
+  subs_validated,
+  path = file.path(output_dir, "postvalidation_iea_subs_validated_comparison.xlsx")
+)
+
+writexl::write_xlsx(
+  regs_validated,
+  path = file.path(output_dir, "postvalidation_iea_regs_validated_comparison.xlsx")
+)
+
+saveRDS(
+  subs_validated,
+  file.path(output_dir, "postvalidation_iea_subs_validated_comparison.rds")
+)
+
+saveRDS(
+  regs_validated,
+  file.path(output_dir, "postvalidation_iea_regs_validated_comparison.rds")
+)
+```
+
+## Auswerung neu
+```{r postvalidation_summary_plots}
+# --- Pakete ---
+library(dplyr)
+library(readr)
+library(readxl)
+library(writexl)
+library(ggplot2)
+library(caret)
+library(psych)
+library(gridExtra)
+library(grid)
+library(stringr)
+
+# --- Daten laden: Vergleichsobjekte aus der Post-Validation ---
+subs_validated <- readRDS(file.path(output_dir, "postvalidation_iea_subs_validated_comparison.rds"))
+regs_validated <- readRDS(file.path(output_dir, "postvalidation_iea_regs_validated_comparison.rds"))
+
+# ==============================
+# Hilfsfunktionen
+# ==============================
+
+# 1) Logische Umwandlung für Consumer-Variablen (Hand + KI)
+to_logical <- function(x) {
+  dplyr::case_when(
+    x %in% c(TRUE, "TRUE", "True", "true", 1, "1")   ~ TRUE,
+    x %in% c(FALSE, "FALSE", "False", "false", 0, "0") ~ FALSE,
+    TRUE ~ NA
+  )
+}
+
+# 2) Binary-Metriken (z.B. consumer_oriented)
+calc_binary_metrics <- function(df, var_hand, var_ki, label = "") {
+  df2 <- df %>%
+    mutate(
+      hand = to_logical(.data[[var_hand]]),
+      ki   = to_logical(.data[[var_ki]])
+    ) %>%
+    filter(!is.na(hand), !is.na(ki))
+
+  N <- nrow(df2)
+  cat(paste0("[Post-Validation Log] ", label, ": ", N, " gültige Beobachtungen\n"))
+
+  if (N == 0) {
+    return(list(
+      N = 0, Absolute = NA, Relative = NA, Kappa = NA,
+      Precision = NA, Recall = NA, F1 = NA, Confusion = NA
+    ))
+  }
+
+  absolute_agreement <- sum(df2$hand == df2$ki)
+  relative_agreement <- absolute_agreement / N
+
+  # Confusion Matrix
+  cm <- caret::confusionMatrix(
+    factor(df2$ki,   levels = c(FALSE, TRUE)),
+    factor(df2$hand, levels = c(FALSE, TRUE))
+  )
+
+  kappa <- psych::cohen.kappa(cbind(df2$hand, df2$ki))$kappa
+  precision <- cm$byClass["Precision"]
+  recall    <- cm$byClass["Recall"]
+  f1        <- cm$byClass["F1"]
+  confusion_table <- cm$table
+
+  list(
+    N = N,
+    Absolute = absolute_agreement,
+    Relative = relative_agreement,
+    Kappa = kappa,
+    Precision = precision,
+    Recall = recall,
+    F1 = f1,
+    Confusion = confusion_table
+  )
+}
+
+# 3) Kategoriale Metriken für Income (exakter Vergleich der Kategorien)
+calc_categorical_metrics <- function(df, var_hand, var_ki, label = "") {
+  df2 <- df %>%
+    mutate(
+      hand = factor(stringr::str_trim(as.character(.data[[var_hand]]))),
+      ki   = factor(stringr::str_trim(as.character(.data[[var_ki]])))
+    ) %>%
+    filter(!is.na(hand), !is.na(ki))
+
+  N <- nrow(df2)
+  cat(paste0("[Post-Validation Log] ", label, ": ", N, " gültige Beobachtungen\n"))
+
+  if (N == 0) {
+    return(list(
+      N = 0, Absolute = NA, Relative = NA, Kappa = NA,
+      Precision = NA, Recall = NA, F1 = NA, Confusion = NA
+    ))
+  }
+
+  levels_all <- union(levels(df2$hand), levels(df2$ki))
+  hand_factor <- factor(df2$hand, levels = levels_all)
+  ki_factor   <- factor(df2$ki,   levels = levels_all)
+
+  absolute_agreement <- sum(hand_factor == ki_factor)
+  relative_agreement <- absolute_agreement / N
+
+  if (length(levels_all) >= 2) {
+    cm <- caret::confusionMatrix(ki_factor, hand_factor)
+    kappa <- psych::cohen.kappa(cbind(hand_factor, ki_factor))$kappa
+    precision <- cm$byClass[, "Precision"]
+    recall    <- cm$byClass[, "Recall"]
+    f1        <- cm$byClass[, "F1"]
+    confusion_table <- cm$table
+  } else {
+    warning(paste("Nur ein Faktor-Level in", label, "- keine vollständige Confusion Matrix möglich."))
+    confusion_table <- NA
+    kappa <- NA
+    precision <- NA
+    recall <- NA
+    f1 <- NA
+  }
+
+  list(
+    N = N,
+    Absolute = absolute_agreement,
+    Relative = relative_agreement,
+    Kappa = kappa,
+    Precision = precision,
+    Recall = recall,
+    F1 = f1,
+    Confusion = confusion_table
+  )
+}
+
+# 3b) Dichotomisierung für Income (Higher vs Not higher – Subsidies)
+dichotomize_income <- function(x) {
+  dplyr::case_when(
+    x == "Higher income" ~ "Higher income",
+    x %in% c("Lower income", "All incomes equally") ~ "Not higher",
+    TRUE ~ NA_character_
+  )
+}
+
+# 3c) Dichotomisierung für Income (Lower vs Not lower – Regulations)
+dichotomize_income_reg <- function(x) {
+  dplyr::case_when(
+    x == "Lower income" ~ "Lower",
+    x %in% c("All incomes equally", "Higher income") ~ "Not lower",
+    TRUE ~ NA_character_
+  )
+}
+
+# 4) Plot-Funktion für Confusion Matrices (wie in deinem Code)
+plot_confusion <- function(cm, title_text, kappa_val, agreement_val) {
+  cm_df <- as.data.frame(as.table(cm))
+  ggplot(cm_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = Freq), size = 5) +
+    scale_fill_gradient(low = "white", high = "steelblue") +
+    labs(
+      title = paste0(
+        title_text,
+        "\nKappa = ", round(kappa_val, 3),
+        " | Rel. Agreement = ", round(agreement_val, 3)
+      ),
+      x = "Human/Expert",
+      y = "AI Coding",
+      fill = "Count"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title  = element_text(size = 12, face = "bold", hjust = 0.5),
+      axis.text   = element_text(size = 11, face = "bold"),
+      axis.title  = element_text(size = 11),
+      legend.title = element_text(size = 9),
+      legend.text  = element_text(size = 8)
+    )
+}
+
+# ==============================
+# Metriken berechnen (3 Kategorien)
+# ==============================
+
+results_post <- list()
+
+# Subsidies – Consumer
+results_post[["Subsidies_Consumer"]] <- calc_binary_metrics(
+  subs_validated,
+  var_hand = "consumer_oriented_hand",
+  var_ki   = "consumer_oriented",
+  label    = "Subsidies_Consumer"
+)
+
+# Subsidies – Income
+results_post[["Subsidies_Income"]] <- calc_categorical_metrics(
+  subs_validated,
+  var_hand = "income_group_hand",
+  var_ki   = "income_group",
+  label    = "Subsidies_Income"
+)
+
+# Regulations – Consumer
+results_post[["Regulations_Consumer"]] <- calc_binary_metrics(
+  regs_validated,
+  var_hand = "consumer_oriented_hand",
+  var_ki   = "consumer_oriented",
+  label    = "Regulations_Consumer"
+)
+
+# Regulations – Income Burden
+results_post[["Regulations_Income"]] <- calc_categorical_metrics(
+  regs_validated,
+  var_hand = "income_burden_group_hand",
+  var_ki   = "income_burden_group",
+  label    = "Regulations_Income"
+)
+
+# ==============================
+# Dichotomisierte Income-Varianten (Subsidies & Regulations)
+# ==============================
+
+valid_income_levels <- c("Lower income", "All incomes equally", "Higher income")
+
+# --- Subsidies: Higher vs Not higher ---
+subs_dicho <- subs_validated %>%
+  dplyr::mutate(
+    consumer_hand_logical = to_logical(consumer_oriented_hand),
+    income_hand_raw       = stringr::str_trim(as.character(income_group_hand)),
+    income_ki_raw         = stringr::str_trim(as.character(income_group))
+  ) %>%
+  dplyr::filter(
+    consumer_hand_logical == TRUE,
+    !is.na(income_hand_raw), !is.na(income_ki_raw),
+    income_hand_raw %in% valid_income_levels,
+    income_ki_raw   %in% valid_income_levels
+  ) %>%
+  dplyr::mutate(
+    Income_Hand_dicho = dichotomize_income(income_hand_raw),
+    Income_ki_dicho   = dichotomize_income(income_ki_raw)
+  )
+
+if (nrow(subs_dicho) > 0) {
+  conf_dicho <- caret::confusionMatrix(
+    factor(subs_dicho$Income_ki_dicho, levels = c("Higher income", "Not higher")),
+    factor(subs_dicho$Income_Hand_dicho, levels = c("Higher income", "Not higher"))
+  )
+  kappa_dicho <- psych::cohen.kappa(
+    cbind(subs_dicho$Income_Hand_dicho, subs_dicho$Income_ki_dicho)
+  )$kappa
+  rel_agreement_dicho <- mean(subs_dicho$Income_Hand_dicho == subs_dicho$Income_ki_dicho)
+
+  cat("\n✅ Income Dichotomized (Subsidies): Kappa =",
+      round(kappa_dicho, 3),
+      "| Rel. Agreement =", round(rel_agreement_dicho, 3), "\n")
+}
+
+# --- Regulations: Lower vs Not lower ---
+regs_dicho <- regs_validated %>%
+  dplyr::mutate(
+    consumer_hand_logical = to_logical(consumer_oriented_hand),
+    income_hand_raw       = stringr::str_trim(as.character(income_burden_group_hand)),
+    income_ki_raw         = stringr::str_trim(as.character(income_burden_group))
+  ) %>%
+  dplyr::filter(
+    consumer_hand_logical == TRUE,
+    !is.na(income_hand_raw), !is.na(income_ki_raw),
+    income_hand_raw %in% valid_income_levels,
+    income_ki_raw   %in% valid_income_levels
+  ) %>%
+  dplyr::mutate(
+    Income_Hand_dicho_reg = dichotomize_income_reg(income_hand_raw),
+    Income_ki_dicho_reg   = dichotomize_income_reg(income_ki_raw)
+  )
+
+if (nrow(regs_dicho) > 0) {
+  conf_reg_dicho <- caret::confusionMatrix(
+    factor(regs_dicho$Income_ki_dicho_reg, levels = c("Lower", "Not lower")),
+    factor(regs_dicho$Income_Hand_dicho_reg, levels = c("Lower", "Not lower"))
+  )
+  kappa_reg_dicho <- psych::cohen.kappa(
+    cbind(regs_dicho$Income_Hand_dicho_reg, regs_dicho$Income_ki_dicho_reg)
+  )$kappa
+  rel_agreement_reg_dicho <- mean(regs_dicho$Income_Hand_dicho_reg == regs_dicho$Income_ki_dicho_reg)
+
+  cat("\n✅ Income Dichotomized (Regulations): Kappa =",
+      round(kappa_reg_dicho, 3),
+      "| Rel. Agreement =", round(rel_agreement_reg_dicho, 3), "\n")
+}
+
+# ==============================
+# Tabellarische Übersicht (3-Kategorisierung)
+# ==============================
+
+summary_table_post <- purrr::imap_dfr(
+  results_post,
+  ~ tibble::tibble(
+    Comparison = .y,
+    N          = .x$N,
+    Absolute   = .x$Absolute,
+    Relative   = .x$Relative,
+    Kappa      = .x$Kappa,
+    # Für kategoriale Fälle sind Precision/Recall/F1 Vektoren -> hier ggf. Mittelwert
+    Precision  = ifelse(length(.x$Precision) > 1, mean(.x$Precision, na.rm = TRUE), .x$Precision),
+    Recall     = ifelse(length(.x$Recall) > 1,    mean(.x$Recall,    na.rm = TRUE), .x$Recall),
+    F1         = ifelse(length(.x$F1) > 1,        mean(.x$F1,        na.rm = TRUE), .x$F1)
+  )
+)
+
+# Excel-Export
+writexl::write_xlsx(
+  summary_table_post,
+  path = file.path(output_dir, paste0("postvalidation_summary_metrics_", Sys.Date(), ".xlsx"))
+)
+
+# ==============================
+# Kompakte Tabelle für Paper: ohne trichotome Income-Zeilen
+# ==============================
+
+# ==============================
+# Kompakte Tabelle für Paper (ohne trichotome Income)
+# ==============================
+
+dicho_rows <- tibble::tibble()
+
+# Subsidies dichotomized
+if (exists("subs_dicho") && exists("kappa_dicho")) {
+  dicho_rows <- dplyr::bind_rows(
+    dicho_rows,
+    tibble::tibble(
+      Comparison = "Subsidies_Income_dichotomized",
+      N          = nrow(subs_dicho),
+      Absolute   = sum(subs_dicho$Income_Hand_dicho == subs_dicho$Income_ki_dicho),
+      Relative   = rel_agreement_dicho,
+      Kappa      = kappa_dicho,
+      Precision  = NA_real_,
+      Recall     = NA_real_,
+      F1         = NA_real_
+    )
+  )
+}
+
+# Regulations dichotomized
+if (exists("regs_dicho") && exists("kappa_reg_dicho")) {
+  dicho_rows <- dplyr::bind_rows(
+    dicho_rows,
+    tibble::tibble(
+      Comparison = "Regulations_Income_dichotomized",
+      N          = nrow(regs_dicho),
+      Absolute   = sum(regs_dicho$Income_Hand_dicho_reg == regs_dicho$Income_ki_dicho_reg),
+      Relative   = rel_agreement_reg_dicho,
+      Kappa      = kappa_reg_dicho,
+      Precision  = NA_real_,
+      Recall     = NA_real_,
+      F1         = NA_real_
+    )
+  )
+}
+
+# Vollständige Tabelle (3-cat + dichotomized)
+summary_table_full <- dplyr::bind_rows(summary_table_post, dicho_rows)
+
+# Kompakte Paper-Version
+summary_table_core <- summary_table_full %>%
+  dplyr::filter(!Comparison %in% c("Subsidies_Income", "Regulations_Income"))
+
+cat("\n--- Kompakte Tabelle für das Paper ---\n")
+print(summary_table_core)
+
+# Speicherort
+latex_path <- file.path(output_dir,
+                        paste0("postvalidation_summary_metrics_core_", Sys.Date(), ".tex"))
+
+# Minimalistische LaTeX-Ausgabe
+sink(latex_path)
+cat("% Auto-generated post-validation agreement table\n")
+cat("\\begin{table}[ht]\n\\centering\n")
+cat("\\begin{tabular}{lrrrrrrr}\n")
+cat("\\textbf{Comparison} & \\textbf{N} & \\textbf{Abs} & \\textbf{Rel} & \\textbf{Kappa} & \\textbf{Prec} & \\textbf{Rec} & \\textbf{F1} \\\\\n")
+cat("\\hline\\hline\n")
+
+for (i in seq_len(nrow(summary_table_core))) {
+  row <- summary_table_core[i, ]
+  cat(
+    row$Comparison, " & ",
+    row$N, " & ",
+    round(row$Absolute, 3), " & ",
+    round(row$Relative, 3), " & ",
+    round(row$Kappa, 3), " & ",
+    ifelse(is.na(row$Precision), "--", round(row$Precision, 3)), " & ",
+    ifelse(is.na(row$Recall), "--", round(row$Recall, 3)), " & ",
+    ifelse(is.na(row$F1), "--", round(row$F1, 3)),
+    " \\\\\n",
+    sep = ""
+  )
+}
+
+cat("\\end{tabular}\n")
+cat("\\caption{Agreement metrics for model–human consistency after post-validation.\\\\ \\textit{Note: “Abs” = absolute agreement; “Rel” = relative accuracy; “Prec” = precision; “Rec” = recall; “F1” = harmonic mean of precision and recall.}}\n")
+cat("\\label{tab:postval_metrics}\n")
+cat("\\end{table}\n")
+sink()
+
+cat("📄 LaTeX-Tabelle gespeichert unter:", latex_path, "\n")
+
+# Zur Kontrolle ausgeben
+cat("\n--- Kompakte Tabelle für Paper (ohne trichotome Income-Varianten) ---\n")
+print(summary_table_core)
+
+# 4) Exporte: XLSX + CSV für die kompakte Tabelle
+writexl::write_xlsx(
+  summary_table_core,
+  path = file.path(output_dir,
+                   paste0("postvalidation_summary_metrics_core_", Sys.Date(), ".xlsx"))
+)
+
+readr::write_csv(
+  summary_table_core,
+  file = file.path(output_dir,
+                   paste0("postvalidation_summary_metrics_core_", Sys.Date(), ".csv"))
+)
+
+
+# ==============================
+# Confusion-Matrix-Plots: 3 Kategorien
+# ==============================
+
+plot_subs_cons <- plot_confusion(
+  results_post[["Subsidies_Consumer"]]$Confusion,
+  "Post-Validation Subsidies – Consumer",
+  results_post[["Subsidies_Consumer"]]$Kappa,
+  results_post[["Subsidies_Consumer"]]$Relative
+)
+
+plot_regs_cons <- plot_confusion(
+  results_post[["Regulations_Consumer"]]$Confusion,
+  "Post-Validation Regulations – Consumer",
+  results_post[["Regulations_Consumer"]]$Kappa,
+  results_post[["Regulations_Consumer"]]$Relative
+)
+
+plot_subs_inc <- if (!is.matrix(results_post[["Subsidies_Income"]]$Confusion)) {
+  NULL
+} else {
+  plot_confusion(
+    results_post[["Subsidies_Income"]]$Confusion,
+    "Post-Validation Subsidies – Income (3-cat)",
+    results_post[["Subsidies_Income"]]$Kappa,
+    results_post[["Subsidies_Income"]]$Relative
+  )
+}
+
+plot_regs_inc <- if (!is.matrix(results_post[["Regulations_Income"]]$Confusion)) {
+  NULL
+} else {
+  plot_confusion(
+    results_post[["Regulations_Income"]]$Confusion,
+    "Post-Validation Regulations – Income (3-cat)",
+    results_post[["Regulations_Income"]]$Kappa,
+    results_post[["Regulations_Income"]]$Relative
+  )
+}
+
+# Plots anzeigen (3-Kategorisierung)
+print(plot_subs_cons)
+print(plot_regs_cons)
+if (!is.null(plot_subs_inc)) print(plot_subs_inc)
+if (!is.null(plot_regs_inc)) print(plot_regs_inc)
+
+# PNG-Export: 3-Kategorisierung
+output_folder <- file.path(output_dir, "postvalidation_plots")
+dir.create(output_folder, recursive = TRUE, showWarnings = FALSE)
+
+png_filename <- file.path(output_folder,
+                          paste0("Postvalidation_Confusion_Matrices_A4_3cat_", Sys.Date(), ".png"))
+
+png(filename = png_filename, width = 4300, height = 3508, res = 300)
+gridExtra::grid.arrange(
+  plot_subs_cons,
+  plot_regs_cons,
+  plot_subs_inc,
+  plot_regs_inc,
+  ncol = 2,
+  top = grid::textGrob(
+    "Post-Validation: Confusion Matrices Human vs AI (3 Categories)",
+    gp = grid::gpar(fontsize = 16, fontface = "bold")
+  )
+)
+dev.off()
+
+cat("✅ Post-Validation Confusion matrices (3-cat) saved as PNG (A4):", png_filename, "\n")
+
+# ==============================
+# Confusion-Matrix-Plots: Dichotomisiert (untere Panels)
+# ==============================
+
+plot_subs_inc_dicho <- if (exists("conf_dicho")) {
+  plot_confusion(
+    conf_dicho$table,
+    "Post-Validation Subsidies – Income (dichotomized)",
+    kappa_dicho,
+    rel_agreement_dicho
+  )
+} else {
+  NULL
+}
+
+plot_regs_inc_dicho <- if (exists("conf_reg_dicho")) {
+  plot_confusion(
+    conf_reg_dicho$table,
+    "Post-Validation Regulations – Income (dichotomized)",
+    kappa_reg_dicho,
+    rel_agreement_reg_dicho
+  )
+} else {
+  NULL
+}
+
+# Plots anzeigen (dichotomisiert)
+if (!is.null(plot_subs_inc_dicho)) print(plot_subs_inc_dicho)
+if (!is.null(plot_regs_inc_dicho)) print(plot_regs_inc_dicho)
+
+# PNG-Export: Dichotomisierung (obere Panels identisch)
+png_filename_dicho <- file.path(output_folder,
+                                paste0("Postvalidation_Confusion_Matrices_A4_dichotomized_", Sys.Date(), ".png"))
+
+png(filename = png_filename_dicho, width = 4300, height = 3508, res = 300)
+gridExtra::grid.arrange(
+  plot_subs_cons,
+  plot_regs_cons,
+  plot_subs_inc_dicho,
+  plot_regs_inc_dicho,
+  ncol = 2,
+  top = grid::textGrob(
+    "Post-Validation: Confusion Matrices Human vs AI (Income Dichotomized)",
+    gp = grid::gpar(fontsize = 16, fontface = "bold")
+  )
+)
+dev.off()
+
+cat("✅ Post-Validation Confusion matrices (dichotomized) saved as PNG (A4):", png_filename_dicho, "\n")
+
+```
+
+Damit hast du:
+
+- **PNG 1**: 3-Kategorien unten (wie bisher, aber beschriftet mit „3-cat“),  
+- **PNG 2**: gleiche oberen Panels, aber Income unten **dichotomisiert** (Subsidies & Regulations).
+
+---
+
+
+
+# Numer of policies per country over time
+```{r}
+all_policies <- bind_rows(
+  subs_mode_sorted %>% mutate(dataset = "Subsidy"),
+  regs_mode_sorted %>% mutate(dataset = "Regulation")
+)
+
+policies_per_country <- all_policies %>%
+  group_by(country, dataset) %>%
+  summarise(n_policies = n_distinct(id_countryiso_year_url), .groups = "drop")
+kable(head(policies_per_country, 20))
+
+policies_per_country_year <- all_policies %>%
+  group_by(country, year, dataset) %>%
+  summarise(n_policies = n_distinct(id_countryiso_year_url), .groups = "drop")
+
+# Gesamt (Subsidy + Regulation zusammen)
+policies_total <- all_policies %>%
+  group_by(country, year) %>%
+  summarise(n_policies = n_distinct(id_countryiso_year_url), .groups = "drop")
+
+library(knitr)
+kable(head(policies_per_country_year, 20))
+
+ggplot(policies_per_country_year,
+       aes(x = year, y = n_policies, color = dataset, group = interaction(country, dataset))) +
+  geom_line() +
+  facet_wrap(~ country, scales = "free_y") +
+  labs(title = "Number of policies per country over time",
+       x = "Year", y = "Number of policies") +
+  theme_minimal()
+ggplot(policies_total,
+       aes(x = year, y = n_policies, group = country, color = country)) +
+  geom_line() +
+  labs(title = "Total number of policies per country over time",
+       x = "Year", y = "Number of policies") +
+  theme_minimal()
+```
+
+
