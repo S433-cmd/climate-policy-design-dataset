@@ -51,4 +51,15 @@ For now, below are the main variable groups documented in the dissertation appen
 - Policy_Instrument, Sub_Category
 - Sector_Classification, sector & instrument counts
 - Metadata
-- Policy_ID, Country, Year, Description, …
+- Policy_ID, Country, Year, Description
+
+
+# ⚠️ Data availability release note:
+
+The dataset is currently under embargo until the dissertation is formally published.
+Once released, this folder will contain:
+- `data/raw/` (snapshots of source exports where licensing permits)
+- `data/processed/` (intermediate files)
+- `data/final/` (DCCSR release files)
+
+Until then, this repository focuses on code structure, documentation, and reproducible processing steps.
