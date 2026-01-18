@@ -1,0 +1,38 @@
+# --- OS ---
+.DS_Store
+
+# --- R ---
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+*.Rproj
+
+# --- R Markdown / knitted outputs ---
+*.html
+*.pdf
+*.docx
+**/*_cache/
+**/*_files/
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+.python-version
+
+# --- Logs / temp ---
+**/Logs/
+**/*.log
+**/*.tmp
+
+# --- Outputs ---
+**/outputs/
+**/Output/
+**/out/
+
+# --- Data (embargo by default) ---
+data/
+!data/README.md
+!data/.gitkeep
