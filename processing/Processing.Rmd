@@ -1,0 +1,1007 @@
+---
+title: "Collapse Wide & 📊 Trial Type Consistency Check"
+author: "Simon Rittershaus"
+date: "`r Sys.Date()`"
+output: html_document
+params:
+  input_file: "aggregated_subsidies_trials_wide_combined.feather"
+  type: "subsidies"  # oder "regulations"
+
+---
+ 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(readr)
+library(janitor)
+library(purrr)
+library(arrow)
+library(knitr)
+library(lubridate)
+```
+
+```{r read-subsidies}
+# Repo-relative directories
+input_dir  <- here::here("processing", "aggregation", "aggregated-outputs")
+output_dir <- here::here("processing", "collapsed")
+
+# Ensure output dir exists (no logic change, just robust)
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Files (repo-relative)
+subs_path <- file.path(input_dir, "aggregated_subsidies_trials_wide_combined.feather")
+regs_path <- file.path(input_dir, "aggregated_regulations_trials_wide_combined.feather")
+
+# Guards
+stopifnot("input_dir missing" = dir.exists(input_dir))
+stopifnot("subs feather missing" = file.exists(subs_path))
+stopifnot("regs feather missing" = file.exists(regs_path))
+
+subs_df <- arrow::read_feather(subs_path) |>
+  dplyr::mutate(dplyr::across(
+    tidyselect::matches("(_sectors_count|_instruments_count|^target_group_int)_T\\d{3}$"),
+    ~ suppressWarnings(as.numeric(.))
+  ))
+
+regs_df <- arrow::read_feather(regs_path) |>
+  dplyr::mutate(dplyr::across(
+    tidyselect::matches("(_sectors_count|_instruments_count|^target_group_int)_T\\d{3}$"),
+    ~ suppressWarnings(as.numeric(.))
+  ))
+
+# Optional: only if you really use params$input_file in this Rmd
+if (!exists("params") || is.null(params$input_file) || !nzchar(params$input_file)) {
+  stop("params$input_file is not set. Provide it when rendering, e.g. params: input_file: 'yourfile.feather'")
+}
+
+input_file_path <- file.path(input_dir, params$input_file)
+stopifnot("params$input_file not found in input_dir" = file.exists(input_file_path))
+
+df <- arrow::read_feather(input_file_path)
+
+# Metadaten-Spalten
+meta_cols <- c("id_countryiso_year_url", "country", "year", "policy_name")
+```
+
+# Variable Type
+##🧾 Erwartete Formate pro Variable
+```{r type}
+fix_variable_types <- function(df, logical_vars, numeric_vars) {
+  to_logical <- function(x) {
+    x <- tolower(trimws(x))
+    dplyr::case_when(
+      x == "true"  ~ TRUE,
+      x == "false" ~ FALSE,
+      TRUE         ~ NA
+    )
+  }
+
+  for (var in logical_vars) {
+    cols <- names(df)[grepl(paste0("^", var, "_T\\d{3}$"), names(df))]
+    df[cols] <- lapply(df[cols], to_logical)
+  }
+
+  for (var in numeric_vars) {
+    cols <- names(df)[grepl(paste0("^", var, "_T\\d{3}$"), names(df))]
+    df[cols] <- lapply(df[cols], function(x) as.numeric(as.character(x)))
+  }
+
+  return(df)
+}
+```
+
+## 🧠 Typkonsistenz über Trials prüfen Subsidies
+```{r}
+# Extrahiere Variable + Trial (consumer_oriented_T000 → consumer_oriented)
+trial_vars <- df %>%
+  select(-all_of(meta_cols)) %>%
+  names()
+
+trial_base_names <- str_remove(trial_vars, "_T\\d{3}$")
+var_trials_map <- split(trial_vars, trial_base_names)
+
+# Hilfsfunktion: Detektiere Typen pro Variable (über Trials hinweg)
+detect_types <- function(var_cols, df) {
+  map_chr(var_cols, ~ class(df[[.x]])[1]) %>% unique()
+}
+
+fix_variable_types <- function(df, logical_vars, numeric_vars) {
+  # Hilfsfunktion für TRUE/FALSE-Umwandlung
+  to_logical <- function(x) {
+    x <- tolower(trimws(x))
+    dplyr::case_when(
+      x == "true"  ~ TRUE,
+      x == "false" ~ FALSE,
+      TRUE         ~ NA
+    )
+  }
+
+  # LOGICAL Variablen konvertieren
+  for (var in logical_vars) {
+    cols <- names(df)[grepl(paste0("^", var, "_T\\d{3}$"), names(df))]
+    df[cols] <- lapply(df[cols], to_logical)
+  }
+
+  # NUMERIC Variablen konvertieren
+  for (var in numeric_vars) {
+    cols <- names(df)[grepl(paste0("^", var, "_T\\d{3}$"), names(df))]
+    df[cols] <- lapply(df[cols], function(x) as.numeric(as.character(x)))
+  }
+
+  return(df)
+}
+# Extrahiere Variable + Trial (consumer_oriented_T000 → consumer_oriented)
+trial_vars <- df %>%
+  select(-all_of(meta_cols)) %>%
+  names()
+
+trial_base_names <- str_remove(trial_vars, "_T\\d{3}$")
+var_trials_map <- split(trial_vars, trial_base_names)
+```
+
+```{r type-check-subsidies}
+meta_cols <- c("id_countryiso_year_url", "country", "year", "policy_name")
+
+expected_types_subs <- list(
+  consumer_oriented = "logical", structural = "logical", hybrid_policy = "logical", none = "logical",
+  policy_category = "character", structural_type = "character", consumer_type = "character",
+  income_group = "character", income_confidence = "character",
+  acquisition_investment_costs = "character", homeownership_requirement = "logical",
+  target_group = "character", target_group_int = "numeric",
+  consumer_sectors = "character", consumer_sectors_count = "numeric",
+  consumer_instruments = "character", consumer_instruments_count = "numeric",
+  additional_consumer_sectors = "character", additional_consumer_sectors_count = "numeric",
+  additional_consumer_instruments = "character", additional_consumer_instruments_count = "numeric",
+  structural_sectors = "character", structural_sectors_count = "numeric",
+  structural_instruments = "character", structural_instruments_count = "numeric",
+  additional_structural_sectors = "character", additional_structural_sectors_count = "numeric",
+  additional_structural_instruments = "character", additional_structural_instruments_count = "numeric",
+  correctly_identified = "logical", source_used = "character", url_field_exists = "logical",
+  external_source_role = "character", external_sources_used = "logical",
+  sector_classification = "character", policy_instrument = "character",
+  sub_category = "character", policy_package = "logical", eu_policy = "character"
+)
+
+logical_vars_subs <- names(expected_types_subs)[expected_types_subs == "logical"]
+numeric_vars_subs <- names(expected_types_subs)[expected_types_subs == "numeric"]
+
+subs_df <- fix_variable_types(subs_df, logical_vars_subs, numeric_vars_subs)
+
+# Typprüfung subsidies
+trial_vars <- names(subs_df)[!names(subs_df) %in% meta_cols]
+trial_base_names <- str_remove(trial_vars, "_T\\d{3}$")
+var_trials_map <- split(trial_vars, trial_base_names)
+relevant_vars <- names(var_trials_map) %in% names(expected_types_subs)
+
+subs_type_summary <- tibble(variable = names(var_trials_map)[relevant_vars]) %>%
+  mutate(
+    types_found = map_chr(variable, ~ paste(detect_types(var_trials_map[[.x]], subs_df), collapse = ", ")),
+    expected_type = unlist(expected_types_subs[variable]),
+    consistent = types_found == expected_type
+  )
+
+kable(subs_type_summary, caption = "🧪 Typprüfung Subsidies")
+
+```
+
+# 🛑 Inkonsistenzen hervorheben Subsidies
+```{r}
+problems_subsidies <- subs_type_summary %>% filter(!consistent)
+
+if (nrow(problems_subsidies) > 0) {
+  warning("❗ Es gibt Typinkonsistenzen bei folgenden Variablen:")
+  print(problems_subsidies)
+} else {
+  message("✅ Alle relevanten Variablen sind typkonsistent über alle Trials hinweg.")
+}
+```
+## 🧠 Typkonsistenz über Trials prüfen Regulations
+
+
+```{r type-check-regulations}
+expected_types_regs <- list(
+  consumer_oriented = "logical", structural = "logical", hybrid_policy = "logical", none = "logical",
+  policy_category = "character", structural_type = "character", consumer_type = "character",
+  income_burden_group = "character", income_confidence = "character",
+  financial_practical_burden = "character", homeownership_requirement = "logical",
+  target_group = "character", target_group_int = "numeric",
+  consumer_sectors = "character", consumer_sectors_count = "numeric",
+  consumer_instruments = "character", consumer_instruments_count = "numeric",
+  additional_consumer_sectors = "character", additional_consumer_sectors_count = "numeric",
+  additional_consumer_instruments = "character", additional_consumer_instruments_count = "numeric",
+  structural_sectors = "character", structural_sectors_count = "numeric",
+  structural_instruments = "character", structural_instruments_count = "numeric",
+  additional_structural_sectors = "character", additional_structural_sectors_count = "numeric",
+  additional_structural_instruments = "character", additional_structural_instruments_count = "numeric",
+  correctly_identified = "logical", source_used = "character", url_field_exists = "logical",
+  external_source_role = "character", external_sources_used = "logical",
+  sector_classification = "character", policy_instrument = "character",
+  sub_category = "character", policy_package = "logical", eu_policy = "character"
+)
+
+logical_vars_regs <- names(expected_types_regs)[expected_types_regs == "logical"]
+numeric_vars_regs <- names(expected_types_regs)[expected_types_regs == "numeric"]
+
+regs_df <- fix_variable_types(regs_df, logical_vars_regs, numeric_vars_regs)
+
+trial_vars_r <- names(regs_df)[!names(regs_df) %in% meta_cols]
+trial_base_names_r <- str_remove(trial_vars_r, "_T\\d{3}$")
+var_trials_map_r <- split(trial_vars_r, trial_base_names_r)
+relevant_vars_r <- names(var_trials_map_r) %in% names(expected_types_regs)
+
+regs_type_summary <- tibble(variable = names(var_trials_map_r)[relevant_vars_r]) %>%
+  mutate(
+    types_found = map_chr(variable, ~ paste(detect_types(var_trials_map_r[[.x]], regs_df), collapse = ", ")),
+    expected_type = unlist(expected_types_regs[variable]),
+    consistent = types_found == expected_type
+  )
+
+kable(regs_type_summary, caption = "🧪 Typprüfung Regulations")
+```
+
+# 🛑 Inkonsistenzen hervorheben Regulations
+
+```{r}
+problems_regulations <- regs_type_summary %>% filter(!consistent)
+
+if (nrow(problems_regulations) > 0) {
+  warning("❗ Es gibt Typinkonsistenzen bei folgenden Variablen (Regulations):")
+  print(problems_regulations)
+} else {
+  message("✅ Alle relevanten Variablen (Regulations) sind typkonsistent über alle Trials hinweg.")
+}
+```
+
+# ⚙️ Hilfsfunktionen Aggregation; Neueste Codierung zählt bei Gleichstand mehr
+
+```{r}
+# Modus bestimmen
+get_mode <- function(x) {
+  x <- na.omit(x)
+  if (length(x) == 0) return(NA)
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+# Modus mit Tie-Break („neuester Trial gewinnt“ oder Prioritätenliste)
+get_mode_tiebreak <- function(values, trials, trial_order, priority_levels = NULL) {
+  # values: Vektor (character / logical) pro ID
+  # trials: Trial-Labels zu 'values' (z. B. "T041", "T042", ...)
+  # trial_order: Ordnung der Trials (älteste -> neueste). Für "neuester gewinnt" nehmen wir die max-Position.
+  # priority_levels: optionale Prioritätenliste, z. B. c("yes","partial","no")
+  
+  # 1) NA entfernen (nur echte Stimmen zählen)
+  keep <- !is.na(values)
+  values <- values[keep]
+  trials <- trials[keep]
+  if (length(values) == 0) return(NA)
+
+  # 2) Häufigkeiten + „neuester Trial“ pro Ausprägung
+  df <- tibble::tibble(val = as.character(values), tr = as.character(trials))
+  # Position jedes Trials in trial_order (klein = alt, groß = neu)
+  pos <- match(df$tr, trial_order)
+  df$pos <- pos
+
+  stats <- df |>
+    dplyr::group_by(val) |>
+    dplyr::summarise(
+      n = dplyr::n(),
+      latest = max(pos, na.rm = TRUE),   # je Ausprägung: neuster Trial, in dem sie vorkommt
+      .groups = "drop"
+    )
+
+  # 3) Optional: Prioritätenliste als sekundärer Tie-Break vor „neuester“
+if (!is.null(priority_levels)) {
+  stats$prio <- match(tolower(stats$val), tolower(priority_levels))
+  stats$prio[is.na(stats$prio)] <- Inf  # Unbekannte Werte ganz nach hinten
+  stats <- stats |>
+    dplyr::arrange(
+      dplyr::desc(n),       # 1) häufigster Wert
+      dplyr::desc(latest),  # 2) neuester Trial gewinnt
+      prio                  # 3) dann Prioritätenliste (kleiner = höher)
+    )
+} else {
+  stats <- stats |>
+    dplyr::arrange(
+      dplyr::desc(n),       # 1) häufigster Wert
+      dplyr::desc(latest)   # 2) neuester Trial gewinnt
+    )
+}
+  stats$val[1]
+}
+
+# Numerik: Modus mit Fallback auf gerundeten Mittelwert
+get_numeric_mode_or_mean <- function(values, trials, trial_order) {
+  x <- suppressWarnings(as.numeric(values))
+  t <- as.character(trials)
+  keep <- !is.na(x)
+  x <- x[keep]; t <- t[keep]
+  if (length(x) == 0) return(NA_integer_)
+
+  # 1) Modus bestimmen
+  tab <- sort(table(x), decreasing = TRUE)
+  top_freq <- tab[1]
+  # Kandidaten mit maximaler Häufigkeit
+  candidates <- as.numeric(names(tab)[tab == top_freq])
+
+  if (length(candidates) == 1L) {
+    return(as.integer(round(candidates[1])))
+  } else {
+    # Gleichstand: nimm Wert, der im neuesten Trial vorkam
+    pos <- match(t, trial_order)
+    df  <- tibble::tibble(val = x, pos = pos)
+    # Für jeden Kandidaten: neueste Position suchen und danach entscheiden
+    latest_pos <- sapply(candidates, function(v) max(df$pos[df$val == v], na.rm = TRUE))
+    winner <- candidates[which.max(latest_pos)]
+    if (!is.na(winner)) return(as.integer(round(winner)))
+  }
+
+  # 2) Fallback: gerundeter Mittelwert
+  return(as.integer(round(mean(x, na.rm = TRUE))))
+}
+
+
+# Aggregiere einen Satz Trial-Spalten
+# Aggregiere einen Satz Trial-Spalten (nur Modus) mit Tie-Break „neuester Trial gewinnt“
+aggregate_trials <- function(df, variables, type, priority_levels = NULL) {
+  id_cols <- c("id_countryiso_year_url", "country", "year", "policy_name")
+  result  <- df %>% dplyr::select(dplyr::all_of(id_cols))
+
+  # Trial-Reihenfolge aus Spaltennamen ableiten (T000..Txxx, aufsteigend -> neuester = größter)
+  trial_order <- names(df) |>
+    stringr::str_extract("T\\d{3}$") |>
+    unique() |>
+    sort(na.last = TRUE)
+
+  for (var in variables) {
+    cols <- grep(paste0("^", var, "_T\\d{3}$"), names(df), value = TRUE)
+
+    tmp <- df |>
+      dplyr::select(dplyr::all_of(id_cols), dplyr::all_of(cols)) |>
+      tidyr::pivot_longer(-dplyr::all_of(id_cols),
+                          names_to = "trial", values_to = "value") |>
+      dplyr::mutate(trial = stringr::str_extract(.data$trial, "T\\d{3}$"))
+
+    if (type == "logical") {
+      tmp <- tmp |>
+        dplyr::mutate(value = dplyr::if_else(value %in% c(TRUE, FALSE), value, as.logical(value))) |>
+        dplyr::group_by(dplyr::across(dplyr::all_of(id_cols))) |>
+        dplyr::summarise(!!var := get_mode_tiebreak(value, trial, trial_order, priority_levels),
+                         .groups = "drop")
+
+} else if (type == "numeric") {
+  tmp <- tmp |>
+    dplyr::group_by(dplyr::across(dplyr::all_of(id_cols))) |>
+    dplyr::summarise(
+      !!var := get_numeric_mode_or_mean(value, trial, trial_order),
+      .groups = "drop"
+    )
+
+    } else { # "character" (kategorisch)
+      tmp <- tmp |>
+        dplyr::group_by(dplyr::across(dplyr::all_of(id_cols))) |>
+        dplyr::summarise(!!var := get_mode_tiebreak(value, trial, trial_order, priority_levels),
+                         .groups = "drop")
+    }
+
+    result <- dplyr::left_join(result, tmp, by = id_cols)
+  }
+
+  result
+}
+```
+
+#📊 Subsidies Aggregation
+
+```{r}
+subs_types <- list(
+  logical = c("consumer_oriented", "structural", "hybrid_policy", "none", "correctly_identified", 
+              "homeownership_requirement", "url_field_exists", "external_sources_used", "policy_package"),
+  numeric = c("target_group_int", "consumer_sectors_count", "consumer_instruments_count", 
+              "additional_consumer_sectors_count", "additional_consumer_instruments_count",
+              "structural_sectors_count", "structural_instruments_count",
+              "additional_structural_sectors_count", "additional_structural_instruments_count"),
+  character = c("policy_category", "structural_type", "consumer_type", "income_group", 
+                "income_confidence", "acquisition_investment_costs", "target_group", 
+                "consumer_sectors", "consumer_instruments", "additional_consumer_sectors", 
+                "additional_consumer_instruments", "structural_sectors", "structural_instruments", 
+                "additional_structural_sectors", "additional_structural_instruments", 
+                "source_used", "external_source_role", "sector_classification", 
+                "policy_instrument", "sub_category", "eu_policy")
+)
+id_cols <- c("id_countryiso_year_url", "country", "year", "policy_name")
+
+subs_agg <- bind_cols(
+  aggregate_trials(subs_df, subs_types$logical, "logical"),
+  aggregate_trials(subs_df, subs_types$numeric, "numeric") %>% select(-all_of(id_cols)),
+  aggregate_trials(subs_df, subs_types$character, "character") %>% select(-all_of(id_cols))
+)
+
+```
+
+# 📊 Regulations Aggregation
+```{r}
+regs_types <- list(
+  logical = c("consumer_oriented", "structural", "hybrid_policy", "none", "correctly_identified", 
+              "homeownership_requirement", "url_field_exists", "external_sources_used", "policy_package"),
+  numeric = c("target_group_int", "consumer_sectors_count", "consumer_instruments_count", 
+              "additional_consumer_sectors_count", "additional_consumer_instruments_count",
+              "structural_sectors_count", "strucural_instruments_count",
+              "additional_structural_sectors_count", "additional_structural_instruments_count"),
+  character = c("policy_category", "structural_type", "consumer_type", "income_burden_group", 
+                "income_confidence", "financial_practical_burden", "target_group", 
+                "consumer_sectors", "consumer_instruments", "additional_consumer_sectors", 
+                "additional_consumer_instruments", "structural_sectors", "structural_instruments", 
+                "additional_structural_sectors", "additional_structural_instruments", 
+                "source_used", "external_source_role", "sector_classification", 
+                "policy_instrument", "sub_category", "eu_policy")
+)
+
+id_cols <- c("id_countryiso_year_url", "country", "year", "policy_name")
+
+
+regs_agg <- bind_cols(
+  aggregate_trials(regs_df, regs_types$logical, "logical"),
+  aggregate_trials(regs_df, regs_types$numeric, "numeric") %>% select(-all_of(id_cols)),
+  aggregate_trials(regs_df, regs_types$character, "character") %>% select(-all_of(id_cols))
+)
+
+```
+
+
+# 📦 R-Code: Aggregationsfunktionen und Vergleichs-DataFrame
+
+```{r}
+# Hilfsfunktionen für Aggregationen
+# Aggregationsfunktionen ------------------------------------------------------
+
+mode_agg <- function(x) {
+  x <- na.omit(x)
+  if (length(x) == 0) return(NA)
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+first_non_na_agg <- function(x) {
+  x[which(!is.na(x))[1]]
+}
+
+second_mode_agg <- function(x) {
+  x <- na.omit(x)
+  if (length(x) == 0) return(NA)
+  tbl <- sort(table(x), decreasing = TRUE)
+  if (length(tbl) >= 2) names(tbl)[2] else NA
+}
+
+n_unique_agg <- function(x) {
+  length(unique(na.omit(x)))
+}
+
+prop_na_agg <- function(x) {
+  mean(is.na(x))
+}
+
+all_equal_agg <- function(x) {
+  vals <- na.omit(x)
+  length(unique(vals)) <= 1
+}
+
+has_disagreement_agg <- function(x) {
+  vals <- na.omit(x)
+  length(unique(vals)) > 1
+}
+
+entropy_agg <- function(x) {
+  x <- na.omit(x)
+  if (length(x) == 0) return(NA)
+  p <- table(x) / length(x)
+  -sum(p * log2(p))
+}
+
+mean_agg <- function(x) {
+  mean(as.numeric(x), na.rm = TRUE)
+}
+
+var_agg <- function(x) {
+  var(as.numeric(x), na.rm = TRUE)
+}
+
+sd_agg <- function(x) {
+  sd(as.numeric(x), na.rm = TRUE)
+}
+
+ci_low_agg <- function(x) {
+  x <- as.numeric(x)
+  se <- sd(x, na.rm = TRUE) / sqrt(sum(!is.na(x)))
+  mean(x, na.rm = TRUE) - 1.96 * se
+}
+
+ci_high_agg <- function(x) {
+  x <- as.numeric(x)
+  se <- sd(x, na.rm = TRUE) / sqrt(sum(!is.na(x)))
+  mean(x, na.rm = TRUE) + 1.96 * se
+}
+
+safe_numeric <- function(x) {
+  x <- as.numeric(x)
+  if (all(is.na(x))) return(NA_real_) else return(x)
+}
+
+range_agg <- function(x) {
+  x <- safe_numeric(x)
+  if (all(is.na(x))) return(NA_real_)
+  rng <- range(x, na.rm = TRUE)
+  diff(rng)
+}
+
+ci_low_agg <- function(x) {
+  x <- safe_numeric(x)
+  if (all(is.na(x))) return(NA_real_)
+  se <- sd(x, na.rm = TRUE) / sqrt(sum(!is.na(x)))
+  mean(x, na.rm = TRUE) - 1.96 * se
+}
+
+ci_high_agg <- function(x) {
+  x <- safe_numeric(x)
+  if (all(is.na(x))) return(NA_real_)
+  se <- sd(x, na.rm = TRUE) / sqrt(sum(!is.na(x)))
+  mean(x, na.rm = TRUE) + 1.96 * se
+}
+
+ci_for_factor <- function(x, level) {
+  x <- tolower(trimws(as.character(x)))
+  x <- ifelse(is.na(x), NA, x == level)
+  ci_low_agg(x)
+}
+
+ci_high_for_factor <- function(x, level) {
+  x <- tolower(trimws(as.character(x)))
+  x <- ifelse(is.na(x), NA, x == level)
+  ci_high_agg(x)
+}
+
+```
+
+
+# 🧪 Anwendung subsidies
+```{r}
+# Subsidies
+# Hilfsfunktion: NA-sicherer Ungleichheitsvergleich
+neq <- function(a, b) {
+  # Gibt TRUE zurück, wenn beide definiert sind und ungleich
+  ifelse(is.na(a) | is.na(b), FALSE, a != b)
+}
+# ohne Prioritätenliste
+subs_modes <- aggregate_trials(subs_df, subs_types$character, "character")
+
+# mit Prioritätenliste
+prio <- c("yes","partial","no")
+subs_modes <- aggregate_trials(subs_df, subs_types$logical,   "logical", priority_levels = prio)   |>
+  dplyr::left_join(aggregate_trials(subs_df, subs_types$character, "character"),
+                   by = c("id_countryiso_year_url","country","year","policy_name"))
+#Falls numeric gebraucht:
+subs_modes <- subs_modes |>
+   dplyr::left_join(aggregate_trials(subs_df, subs_types$numeric, "numeric"),
+                    by = c("id_countryiso_year_url","country","year","policy_name"))
+
+# Flags vs. T041/T042
+subs_flags <- subs_df %>%
+  select(id_countryiso_year_url, country, year, policy_name,
+         consumer_oriented_T041 = matches("^consumer_oriented_T041$"),
+         consumer_oriented_T042 = matches("^consumer_oriented_T042$"),
+         income_group_T041      = matches("^income_group_T041$"),
+         income_group_T042      = matches("^income_group_T042$"))
+
+subs_modes <- subs_modes %>%
+  left_join(subs_flags, by = c("id_countryiso_year_url","country","year","policy_name")) %>%
+  mutate(
+    flag_consumer_oriented_not_41_42 =
+      neq(consumer_oriented, consumer_oriented_T041) | neq(consumer_oriented, consumer_oriented_T042),
+    flag_income_group_not_41_42 =
+      neq(income_group, income_group_T041) | neq(income_group, income_group_T042)
+  ) %>%
+  select(-consumer_oriented_T041, -consumer_oriented_T042,
+         -income_group_T041, -income_group_T042)
+```
+
+# 🧪 Anwendung regulations
+```{r }
+# Regulations
+# Hilfsfunktion: NA-sicherer Ungleichheitsvergleich
+neq <- function(a, b) {
+  # Gibt TRUE zurück, wenn beide definiert sind und ungleich
+  ifelse(is.na(a) | is.na(b), FALSE, a != b)
+}
+regs_modes <- aggregate_trials(regs_df, regs_types$character, "character")
+
+# mit Prioritätenliste
+prio <- c("yes","partial","no")
+
+regs_modes <- aggregate_trials(regs_df, regs_types$logical,   "logical", priority_levels = prio)   |>
+  dplyr::left_join(aggregate_trials(regs_df, regs_types$character, "character"),
+                   by = c("id_countryiso_year_url","country","year","policy_name"))
+# Falls numeric gebraucht:
+ regs_modes <- regs_modes |>
+   dplyr::left_join(aggregate_trials(regs_df, regs_types$numeric, "numeric"),
+                    by = c("id_countryiso_year_url","country","year","policy_name"))
+
+# Flags vs. T039/T040
+regs_flags <- regs_df %>%
+  select(id_countryiso_year_url, country, year, policy_name,
+         consumer_oriented_T039 = matches("^consumer_oriented_T039$"),
+         consumer_oriented_T040 = matches("^consumer_oriented_T040$"),
+         income_burden_group_T039 = matches("^income_burden_group_T039$"),
+         income_burden_group_T040 = matches("^income_burden_group_T040$"))
+
+regs_modes <- regs_modes %>%
+  left_join(regs_flags, by = c("id_countryiso_year_url","country","year","policy_name")) %>%
+  mutate(
+    flag_consumer_oriented_not_39_40 =
+      neq(consumer_oriented, consumer_oriented_T039) | neq(consumer_oriented, consumer_oriented_T040),
+    flag_income_burden_group_not_39_40 =
+      neq(income_burden_group, income_burden_group_T039) | neq(income_burden_group, income_burden_group_T040)
+  ) %>%
+  select(-consumer_oriented_T039, -consumer_oriented_T040,
+         -income_burden_group_T039, -income_burden_group_T040)
+# Ggf. numeric analog ergänzen/entfernen
+```
+
+## Germany Exampel
+```{r}
+# ---- Inspect two IDs across Subsidies & Regulations, over trials ----
+# Voraussetzungen:
+# - subs_df und/oder regs_df (Wide: *_T000 ... *_Txxx)
+# - Metaspalten: id_countryiso_year_url, country, year, policy_name
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+
+focus_ids <- c("276202011552", "276202114957")
+
+# Variablen von Interesse (Regulations wird auf income_group gemappt)
+vars_of_interest <- c("consumer_oriented", "income_group")
+
+# 1) Quellen vorbereiten (dataset-Marker) + Harmonisierung income_burden_group_* -> income_group_*
+subs_src <- if (exists("subs_df")) {
+  subs_df %>% mutate(dataset = "Subsidy")
+} else tibble()
+
+regs_src <- if (exists("regs_df")) {
+  nm <- names(regs_df)
+  nm <- sub("^income_burden_group_(T\\d{3})$", "income_group_\\1", nm)
+  regs_df_renamed <- regs_df
+  names(regs_df_renamed) <- nm
+  regs_df_renamed %>% mutate(dataset = "Regulation")
+} else tibble()
+
+# 2) zusammenführen
+wide_src <- bind_rows(subs_src, regs_src)
+
+# 3) nur die beiden IDs + die Trial-Spalten zu consumer_oriented / income_group
+wide_filtered <- wide_src %>%
+  filter(id_countryiso_year_url %in% focus_ids) %>%
+  select(
+    id_countryiso_year_url, country, year, policy_name, dataset,
+    matches("^consumer_oriented_T\\d{3}$|^income_group_T\\d{3}$")
+  )
+
+# *** FIX: vor pivot_longer Datentypen angleichen (character), sonst Typkonflikt ***
+wide_filtered <- wide_filtered %>%
+  mutate(
+    across(
+      matches("^consumer_oriented_T\\d{3}$|^income_group_T\\d{3}$"),
+      ~ as.character(.)
+    )
+  )
+
+# 4) Wide -> Long (Trials extrahieren)
+long_two_vars <- wide_filtered %>%
+  pivot_longer(
+    cols = matches("^consumer_oriented_T\\d{3}$|^income_group_T\\d{3}$"),
+    names_to = "var_trial",
+    values_to = "value"
+  ) %>%
+  mutate(
+    variable = str_remove(var_trial, "_T\\d{3}$"),
+    trial    = str_extract(var_trial, "T\\d{3}$")
+  ) %>%
+  select(id_countryiso_year_url, country, year, policy_name, dataset, variable, trial, value) %>%
+  arrange(variable, id_countryiso_year_url, dataset, trial)
+
+# 5) Rohansicht je Trial (optional für Debug/Review)
+trial_view <- long_two_vars
+
+# 6) Unterschiede über Trials je ID/Datensatz/Variable
+differences_summary <- long_two_vars %>%
+  group_by(id_countryiso_year_url, dataset, variable) %>%
+  summarise(
+    n_trials    = n_distinct(trial),
+    n_values    = n_distinct(value, na.rm = TRUE),
+    has_changes = n_values > 1,
+    values_seen = paste(sort(unique(na.omit(as.character(value)))), collapse = " | "),
+    .groups = "drop"
+  ) %>%
+  arrange(variable, id_countryiso_year_url, dataset)
+
+# 7) Kompakte Querform: Variablen = Zeilen, Beobachtungen = Spalten (Modus je ID×Dataset)
+get_mode_simple <- function(x) {
+  x <- na.omit(x)
+  if (length(x) == 0) return(NA_character_)
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+mode_table <- long_two_vars %>%
+  group_by(id_countryiso_year_url, dataset, variable) %>%
+  summarise(mode_value = get_mode_simple(as.character(value)), .groups = "drop") %>%
+  mutate(obs_col = paste0(id_countryiso_year_url, " [", dataset, "]")) %>%
+  select(obs_col, variable, mode_value) %>%
+  pivot_wider(
+    names_from = obs_col,
+    values_from = mode_value
+  ) %>%
+  arrange(factor(variable, levels = vars_of_interest))
+
+# 8) Klarname je ID + schönes Spaltenlabel (ID (Country Year – Policy) [Dataset])
+#    + deutsche Klar-Namen
+name_map_de <- c(
+  "276202011551" = "E-Auto Kaufprämie (Umweltbonus)",
+  "276202114957" = "KfW-Bundesförderung für effiziente Gebäude (BEG)"
+)
+
+id_labels <- long_two_vars %>%
+  distinct(id_countryiso_year_url, country, year, policy_name, dataset) %>%
+  mutate(
+    de_name   = name_map_de[id_countryiso_year_url],
+    col_label = ifelse(!is.na(de_name) & nzchar(de_name),
+                       paste0(de_name, " [", dataset, "]"),
+                       paste0(id_countryiso_year_url, " (", country, " ", year, " – ", policy_name, ") [", dataset, "]"))
+  )
+
+# Spalten-Namen im Modus-Table ersetzen
+mode_table_labeled <- mode_table %>%
+  rename_with(.cols = -variable, .fn = function(nm) {
+    raw_id <- sub(" \\[.*\\]$", "", nm)
+    ds     <- sub("^.*\\[|\\]$", "", nm)
+    where  <- which(id_labels$id_countryiso_year_url == raw_id & id_labels$dataset == ds)[1]
+    lab    <- if (!is.na(where)) id_labels$col_label[where] else nm
+    lab
+  })
+
+# 9) Anzeigen (optional)
+print(head(trial_view, 20))
+print(differences_summary)
+print(mode_table_labeled)
+# (Für Rmd hübsch:)
+# knitr::kable(head(trial_view, 20))
+# knitr::kable(differences_summary)
+# knitr::kable(mode_table_labeled)
+```
+
+## Export Exampel
+
+```{r}
+# ---- Export two selected policies as variables=rows, observations=columns (CSV + LaTeX) ----
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(readr)
+library(kableExtra)
+
+# Hilfsfunktion: LaTeX escapen (nur &, %, $, #, _, ~, ^), \\-Umbrüche erhalten
+latex_escape_keep_newlines <- function(x) {
+  if (length(x) == 0) return(x)
+  x <- as.character(x)
+  # Platzhalter für manuell gesetzte Zeilenumbrüche
+  placeholder <- "\uE000BR\uE000"
+  x <- str_replace_all(x, fixed("\\\\"), placeholder)
+
+  # NUR kritische Zeichen escapen (KEIN Backslash, KEINE geschweiften Klammern!)
+  x <- str_replace_all(x, c(
+    "&" = "\\\\&",
+    "%" = "\\\\%",
+    "\\$" = "\\\\$",
+    "#" = "\\\\#",
+    "_" = "\\\\_",
+    "~" = "\\\\textasciitilde{}",
+    "\\^" = "\\\\textasciicircum{}"
+  ))
+
+  # Platzhalter zurück in echte Umbrüche
+  x <- str_replace_all(x, fixed(placeholder), "\\\\\\\\")
+  x
+}
+
+# 0) IDs und Klar-Namen (deutsch)
+focus_ids <- c("276202011552", "276202114957")
+name_map_de <- c(
+  "276202011552" = "E-Auto Kaufprämie (Umweltbonus)",
+  "276202114957" = "KfW-Bundesförderung für effiziente Gebäude (BEG)"
+)
+
+# 1) Herkunftsdaten zusammenführen
+stopifnot(exists("subs_modes") || exists("regs_modes"))
+
+subs_sel <- if (exists("subs_modes")) {
+  subs_modes %>% filter(id_countryiso_year_url %in% focus_ids) %>% mutate(dataset = "Subsidy")
+} else tibble()
+
+regs_sel <- if (exists("regs_modes")) {
+  regs_modes %>% filter(id_countryiso_year_url %in% focus_ids) %>% mutate(dataset = "Regulation")
+} else tibble()
+
+already   <- subs_sel$id_countryiso_year_url
+regs_only <- regs_sel %>% filter(!id_countryiso_year_url %in% already)
+both_sel  <- bind_rows(subs_sel, regs_only)
+
+# 2) Spaltenauswahl
+keep_cols <- c(
+  "id_countryiso_year_url","country","year","policy_name",
+  "consumer_oriented","structural","hybrid_policy","homeownership_requirement","policy_package",
+  "consumer_type","income_group","income_confidence","acquisition_investment_costs","target_group",
+  "consumer_sectors","consumer_instruments","consumer_sectors_count","consumer_instruments_count",
+  "sector_classification","policy_instrument","sub_category","eu_policy",
+  "dataset"
+)
+missing_cols <- setdiff(keep_cols, names(both_sel))
+if (length(missing_cols)) both_sel[missing_cols] <- NA
+
+# 3) Klarname ergänzen
+long_base <- both_sel %>%
+  select(all_of(keep_cols)) %>%
+  mutate(
+    policy_clear_name = name_map_de[id_countryiso_year_url],
+    year = suppressWarnings(as.integer(year))
+  ) %>%
+  arrange(country, year, policy_name)
+
+# 4) Reihenfolge
+meta_rows <- c("id_countryiso_year_url", "country", "year", "policy_name")
+vars_rows <- c(
+  "consumer_oriented","structural","hybrid_policy","homeownership_requirement","policy_package",
+  "consumer_type","income_group","income_confidence","acquisition_investment_costs","target_group",
+  "consumer_sectors","consumer_instruments","consumer_sectors_count","consumer_instruments_count",
+  "sector_classification","policy_instrument","sub_category","eu_policy"
+)
+row_order <- c(meta_rows, vars_rows)
+
+# 5) Transformieren
+matrix_long <- long_base %>%
+  select(policy_clear_name, all_of(row_order)) %>%
+  mutate(across(everything(), as.character)) %>%
+  pivot_longer(
+    cols = all_of(row_order),
+    names_to = "variable",
+    values_to = "value"
+  )
+
+matrix_wide <- matrix_long %>%
+  pivot_wider(
+    names_from  = policy_clear_name,
+    values_from = value
+  ) %>%
+  arrange(factor(variable, levels = row_order))
+
+# 6) Umbrüche in Headers und policy_name-Zeile
+make_headers_csv <- function(x) {
+  x %>%
+    str_replace("\\s*\\(Umweltbonus\\)", "\n(Umweltbonus)") %>%
+    str_replace("\\s+für effiziente Gebäude", "\nfür effiziente Gebäude")
+}
+make_headers_tex <- function(x) {
+  x %>%
+    str_replace("\\s*\\(Umweltbonus\\)", " \\\\ (Umweltbonus)") %>%
+    str_replace("\\s+für effiziente Gebäude", " \\\\ für effiziente Gebäude")
+}
+make_values_csv <- function(x) {
+  x %>%
+    str_replace("\\s*\\(Umweltbonus\\)", "\n(Umweltbonus)") %>%
+    str_replace("\\s+für effiziente Gebäude", "\nfür effiziente Gebäude")
+}
+make_values_tex <- function(x) {
+  x %>%
+    str_replace("\\s*\\(Umweltbonus\\)", " \\\\ (Umweltbonus)") %>%
+    str_replace("\\s+für effiziente Gebäude", " \\\\ für effiziente Gebäude")
+}
+
+# a) Header transformieren
+col_names_csv <- names(matrix_wide)
+col_names_tex <- names(matrix_wide)
+if (length(col_names_csv) > 1) {
+  col_names_csv[-1] <- make_headers_csv(col_names_csv[-1])
+  col_names_tex[-1] <- make_headers_tex(col_names_tex[-1])
+}
+
+# b) policy_name-Zeile ebenfalls mit Zeilenumbruch behandeln
+matrix_wide_csv <- matrix_wide
+matrix_wide_tex <- matrix_wide
+
+idx_policy_name <- which(matrix_wide_csv$variable == "policy_name")
+if (length(idx_policy_name) == 1) {
+  matrix_wide_csv[idx_policy_name, -1] <- lapply(matrix_wide_csv[idx_policy_name, -1], make_values_csv)
+  matrix_wide_tex[idx_policy_name, -1] <- lapply(matrix_wide_tex[idx_policy_name, -1], make_values_tex)
+}
+
+# Header anwenden
+names(matrix_wide_csv) <- col_names_csv
+names(matrix_wide_tex) <- col_names_tex
+
+# --- Wichtig: Jetzt Inhalte + Header LaTeX-sicher machen (ohne Backslash/{}-Escape)
+names(matrix_wide_tex) <- vapply(names(matrix_wide_tex), latex_escape_keep_newlines, FUN.VALUE = character(1))
+for (j in seq_along(matrix_wide_tex)) {
+  matrix_wide_tex[[j]] <- vapply(matrix_wide_tex[[j]], latex_escape_keep_newlines, FUN.VALUE = character(1))
+}
+
+# 7) Export
+base <- file.path(output_dir, "policies_two_mode_matrix_named")
+
+# CSV
+readr::write_csv(matrix_wide_csv, paste0(base, ".csv"))
+
+# LaTeX
+save_as_tex <- function(df, path, caption, label, escape = FALSE) {
+  kbl(df, format = "latex", booktabs = TRUE, longtable = TRUE,
+      caption = caption, label = label, align = "l", escape = escape) |>
+    kable_styling(latex_options = c("hold_position","repeat_header","striped","scale_down")) |>
+    row_spec(0, bold = TRUE) |>
+    save_kable(path)
+}
+
+save_as_tex(
+  matrix_wide_tex,
+  paste0(base, ".tex"),
+  caption = "Variablen (Zeilen) und ausgewählte Politiken (Spalten) – Modusaggregation",
+  label   = "tab:policies_two_mode_matrix",
+  escape  = FALSE
+)
+
+message("Exportiert: ",
+        paste0(base, ".csv"), " und ",
+        paste0(base, ".tex"))
+```
+
+# Export
+```{r export}
+# 🔽 Vor dem Export: sauber sortieren (country, year, policy_name)
+#    year sicher als integer sortieren (falls als character eingelesen)
+subs_mode_sorted <- subs_modes %>%
+  dplyr::mutate(year = suppressWarnings(as.integer(year))) %>%
+  dplyr::arrange( year, country, policy_name)
+
+regs_mode_sorted <- regs_modes %>%
+  dplyr::mutate(year = suppressWarnings(as.integer(year))) %>%
+  dplyr::arrange( year,country, policy_name)
+
+# 📁 Dateinamen (deutlich mit "mode_aggregated")
+subs_base <- file.path(output_dir, "collapsed_subsidies_trials_mode_aggregated")
+regs_base <- file.path(output_dir, "collapsed_regulations_trials_mode_aggregated")
+
+# 🪶 Feather
+arrow::write_feather(subs_mode_sorted, paste0(subs_base, ".feather"))
+arrow::write_feather(regs_mode_sorted, paste0(regs_base, ".feather"))
+
+# 📄 CSV
+readr::write_csv(subs_mode_sorted, paste0(subs_base, ".csv"))
+readr::write_csv(regs_mode_sorted, paste0(regs_base, ".csv"))
+
+# 🧠 RDS
+readr::write_rds(subs_mode_sorted, paste0(subs_base, ".rds"))
+readr::write_rds(regs_mode_sorted, paste0(regs_base, ".rds"))
+
+# 📊 XLSX
+writexl::write_xlsx(subs_mode_sorted, paste0(subs_base, ".xlsx"))
+writexl::write_xlsx(regs_mode_sorted, paste0(regs_base, ".xlsx"))
+
+# 💾 RData (jeweils separat)
+save(subs_mode_sorted, file = paste0(subs_base, ".RData"))
+save(regs_mode_sorted, file = paste0(regs_base, ".RData"))
+
+# (Optional) Beide Objekte gemeinsam in EINER RData:
+save(subs_mode_sorted, regs_mode_sorted, file = file.path(output_dir, "collapsed_both_mode_aggregated.RData"))
+```
+
