@@ -1,4 +1,4 @@
-# Climate Policy Design Dataset (DCCSR)  
+# Climate Policy Design Dataset
 **Domestic Consumer Climate Subsidies & Regulations (1990–2022)**
 
 ![Status](https://img.shields.io/badge/status-under%20construction-yellow)
