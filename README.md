@@ -85,10 +85,15 @@ See `CHANGELOG.md`.
 ---
 
 ## Citation
-A citation entry will be added once the dissertation/paper is public.  
-For now, please cite the dissertation chapter introducing the dataset.
+
+If you use this dataset or the accompanying code, please cite it as follows:
+
+**APA:**
+> Rittershaus, S. (2026). *ClimateGen: A Climate Policy Design Dataset* (Version 1.0.0) [Data set]. Exzellenzcluster "The Politics of Inequality" (Konstanz). GESIS Data Archive. https://doi.org/10.7802/3038
 
 ---
 
-## License
-License to be confirmed (TBD).
+## License & Data Access
+The dataset is hosted at the GESIS Data Archive and is available under Free Access (with registration).
+
+To download the dataset (.csv, .dta, or .rds files) and review the exact terms of use, please visit the dataset's DOI link: https://doi.org/10.7802/3038.
