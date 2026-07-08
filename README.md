@@ -91,7 +91,9 @@ See `CHANGELOG.md`.
 If you use this dataset or the accompanying code, please cite it as follows:
 
 **APA:**
-> Rittershaus, S. (2026). *ClimateGen: A Climate Policy Design Dataset* (Version 1.0.0) [Data set]. Exzellenzcluster "The Politics of Inequality" (Konstanz). GESIS Data Archive. https://doi.org/10.7802/3038
+> Rittershaus, S. (2026). ClimateGen (Version 1.0.0) [Data set]. Exzellenzcluster "The Politics of Inequality" (Konstanz). https://doi.org/10.7802/3038
+>
+
 
 ---
 
